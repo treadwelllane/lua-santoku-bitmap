@@ -1,3 +1,3 @@
 # Now
 
-- tbd
+- Allow specifying int type to use for raw bitmaps

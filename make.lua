@@ -1,13 +1,13 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.2-1",
+  version = "0.0.3-1",
   variable_prefix = "TK_BITMAP",
   public = true,
 
   dependencies = {
     "lua == 5.1",
-    "santoku >= 0.0.196-1",
+    "santoku >= 0.0.201-1",
   },
 
   test = {

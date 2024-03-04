@@ -92,14 +92,14 @@ static int clear (lua_State *L)
 }
 
 typedef struct {
-  unsigned int *raw;
+  uint32_t *raw;
 } raw_state_t;
 
 static bool raw_iter (uint32_t val, void *statepv)
 {
   raw_state_t *statep = (raw_state_t *) statepv;
-  unsigned int byte = val / (sizeof(unsigned int) * CHAR_BIT);
-  unsigned int bit = val % (sizeof(unsigned int) * CHAR_BIT);
+  uint32_t byte = val / (sizeof(uint32_t) * CHAR_BIT);
+  uint32_t bit = val % (sizeof(uint32_t) * CHAR_BIT);
   statep->raw[byte] |= 1 << bit;
   return true;
 }
@@ -108,31 +108,29 @@ static int raw (lua_State *L)
 {
   lua_settop(L, 2);
   roaring_bitmap_t *bm = peek(L, 1);
-  size_t chunks;
+  lua_Integer bits;
   if (lua_type(L, 2) != LUA_TNIL) {
-    lua_Integer bits = luaL_checkinteger(L, 2);
-    if (bits == 0) {
-      chunks = 0;
-    } else if (bits < 0) {
+    bits = luaL_checkinteger(L, 2);
+    if (bits < 0) {
       return luaL_error(L, "number of bits can't be negative");
     } else if (bits > UINT32_MAX) {
       return luaL_error(L, "number of bits can't be greater than UINT32_MAX");
-    } else {
-      chunks = bits / (sizeof(unsigned int) * CHAR_BIT) + 1;
     }
   } else if (roaring_bitmap_get_cardinality(bm) == 0) {
-    chunks = 0;
+    bits = 0;
   } else {
-    uint32_t max = roaring_bitmap_maximum(bm);
-    chunks = max / (sizeof(unsigned int) * CHAR_BIT) + 1;
+    bits = roaring_bitmap_maximum(bm) + 1;
   }
+  uint32_t chunks =
+    (bits / (sizeof(uint32_t) * CHAR_BIT)) +
+    (bits % (sizeof(uint32_t) * CHAR_BIT) > 0);
   raw_state_t state;
-  state.raw = malloc(sizeof(unsigned int) * chunks);
-  memset(state.raw, 0, sizeof(unsigned int) * chunks);
+  state.raw = malloc(sizeof(uint32_t) * chunks);
+  memset(state.raw, 0, sizeof(uint32_t) * chunks);
   roaring_iterate(bm, raw_iter, &state);
   if (state.raw == NULL)
     luaL_error(L, "error in malloc");
-  lua_pushlstring(L, (char *) state.raw, sizeof(unsigned int) * chunks);
+  lua_pushlstring(L, (char *) state.raw, sizeof(uint32_t) * chunks);
   free(state.raw);
   return 1;
 }
@@ -143,12 +141,12 @@ static int tostring (lua_State *L)
   raw(L);
   size_t size_c;
   const char *raw_c = luaL_checklstring(L, -1, &size_c);
-  size_t size_u = size_c ? size_c / sizeof(unsigned int) : 0;
-  unsigned int *raw_u = (unsigned int *) raw_c;
+  size_t size_u = size_c ? size_c / sizeof(uint32_t) : 0;
+  uint32_t *raw_u = (uint32_t *) raw_c;
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
   for (size_t i = 0; i < size_u; i ++)
-    for (unsigned int c = 0; c < sizeof(unsigned int) * CHAR_BIT; c ++)
+    for (uint32_t c = 0; c < sizeof(uint32_t) * CHAR_BIT; c ++)
       luaL_addchar(&buf, (raw_u[i] & (1 << c)) ? '1' : '0');
   luaL_pushresult(&buf);
   return 1;
@@ -241,6 +239,8 @@ int luaopen_santoku_bitmap_capi (lua_State *L)
 {
   lua_newtable(L); // t
   luaL_register(L, NULL, fns); // t
+  lua_pushinteger(L, sizeof(uint32_t) * CHAR_BIT); // t i
+  lua_setfield(L, -2, "chunk_bits"); // t
   luaL_newmetatable(L, MT); // t mt
   lua_pushcfunction(L, destroy); // t mt fn
   lua_setfield(L, -2, "__gc"); // t mt
