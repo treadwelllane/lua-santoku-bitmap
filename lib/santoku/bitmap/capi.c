@@ -20,14 +20,27 @@ static int destroy (lua_State *L)
 
 static int create (lua_State *L)
 {
-  lua_settop(L, 0);
+  lua_settop(L, 2);
   roaring_bitmap_t *bm = roaring_bitmap_create();
   if (bm == NULL)
     luaL_error(L, "memory error creating bitmap");
-  roaring_bitmap_t **bmp = (roaring_bitmap_t **) lua_newuserdata(L, sizeof(roaring_bitmap_t *));
+  roaring_bitmap_t **bmp = (roaring_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring_bitmap_t *)); // t, n, b
   *bmp = bm;
-  luaL_getmetatable(L, MT);
-  lua_setmetatable(L, -2);
+  luaL_getmetatable(L, MT); // t, n, b, mt
+  lua_setmetatable(L, -2); // t, n, b
+  if (lua_type(L, 1) != LUA_TNIL)
+  {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_Integer n = luaL_checkinteger(L, 2);
+    for (lua_Integer i = 1; i <= n; i ++) {
+      lua_pushinteger(L, i); // t, n, b, i
+      lua_gettable(L, -4); // t, n, b, bit
+      if (lua_toboolean(L, -1))
+        roaring_bitmap_add(bm, i - 1);
+      lua_pop(L, 1); // t, n, b
+    }
+  }
   return 1;
 }
 

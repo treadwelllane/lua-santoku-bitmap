@@ -72,3 +72,10 @@ test("extends", function ()
   assert(eq(bm.tostring(c, 61), "1001000000000000000000000000000010010000000000000000000000000000"))
 
 end)
+
+test("create from table", function ()
+
+  local b = bm.create({ [1] = true, [3] = true, [9] = true }, 9)
+  assert(eq(bm.tostring(b, 9), "10100000100000000000000000000000"))
+
+end)
