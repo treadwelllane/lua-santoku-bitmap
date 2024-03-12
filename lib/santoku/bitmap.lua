@@ -7,7 +7,7 @@ local it = require("santoku.iter")
 local ivals = it.ivals
 
 local tbl = require("santoku.table")
-local assign = tbl.assign
+local merge = tbl.merge
 
 local function raw_matrix (bs, n)
   local b0 = create()
@@ -20,6 +20,6 @@ local function raw_matrix (bs, n)
   return bm.raw(b0, #bs * step)
 end
 
-return assign({
+return merge({
   raw_matrix = raw_matrix
-}, bm, false)
+}, bm)
