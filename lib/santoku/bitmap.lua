@@ -19,6 +19,15 @@ local function raw_matrix (bs, n, s, e)
   return bm.raw(b0, #bs * step)
 end
 
+local function next (b, i)
+  for j = i + 1, bm.maximum(b) do
+    if bm.get(b, j) then
+      return j
+    end
+  end
+end
+
 return merge({
-  raw_matrix = raw_matrix
+  raw_matrix = raw_matrix,
+  next = next
 }, bm)

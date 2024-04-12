@@ -96,6 +96,22 @@ static int cardinality (lua_State *L)
   return 1;
 }
 
+static int minimum (lua_State *L)
+{
+  lua_settop(L, 1);
+  roaring_bitmap_t *bm = peek(L, 1);
+  lua_pushinteger(L, roaring_bitmap_minimum(bm) + 1);
+  return 1;
+}
+
+static int maximum (lua_State *L)
+{
+  lua_settop(L, 1);
+  roaring_bitmap_t *bm = peek(L, 1);
+  lua_pushinteger(L, roaring_bitmap_maximum(bm) + 1);
+  return 1;
+}
+
 static int clear (lua_State *L)
 {
   lua_settop(L, 1);
@@ -237,6 +253,8 @@ static luaL_Reg fns[] =
   { "get", get },
   { "unset", unset },
   { "cardinality", cardinality },
+  { "minimum", minimum },
+  { "maximum", maximum },
   { "clear", clear },
   { "raw", raw },
   { "tostring", tostring },
