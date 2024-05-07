@@ -79,3 +79,10 @@ test("create from table", function ()
   assert(eq(bm.tostring(b, 9), "10100000100000000000000000000000"))
 
 end)
+
+test("raw, from_raw", function ()
+
+  local b = bm.from_raw(bm.raw(bm.create({ [1] = true, [3] = true, [9] = true }, 9)))
+  assert(eq(bm.tostring(b, 9), "10100000100000000000000000000000"))
+
+end)

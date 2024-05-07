@@ -164,6 +164,27 @@ static int raw (lua_State *L)
   return 1;
 }
 
+static int from_raw (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TSTRING);
+  size_t size;
+  const char *raw = lua_tolstring(L, 1, &size);
+  roaring_bitmap_t *bm = roaring_bitmap_create();
+  if (bm == NULL)
+    luaL_error(L, "memory error creating bitmap");
+  roaring_bitmap_t **bmp = (roaring_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring_bitmap_t *)); // s, b
+  *bmp = bm;
+  luaL_getmetatable(L, MT); // s, b, mt
+  lua_setmetatable(L, -2); // s, b
+  for (size_t i = 0; i < size; i ++)
+    for (size_t j = 0; j < CHAR_BIT; j ++)
+      if (raw[i] & (1 << j))
+        roaring_bitmap_add(bm, i * CHAR_BIT + j);
+  return 1;
+}
+
 static int tostring (lua_State *L)
 {
   lua_settop(L, 2);
@@ -257,6 +278,7 @@ static luaL_Reg fns[] =
   { "maximum", maximum },
   { "clear", clear },
   { "raw", raw },
+  { "from_raw", from_raw },
   { "tostring", tostring },
   { "equals", equals },
   { "and", and },
