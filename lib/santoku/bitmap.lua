@@ -27,7 +27,19 @@ local function next (b, i)
   end
 end
 
+local function hamming (a, b, t)
+  if t then
+    bm.clear(t)
+  else
+    t = bm.create()
+  end
+  bm["or"](t, a)
+  bm["xor"](t, b)
+  return bm.cardinality(t)
+end
+
 return merge({
   raw_matrix = raw_matrix,
-  next = next
+  next = next,
+  hamming = hamming,
 }, bm)
