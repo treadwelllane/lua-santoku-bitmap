@@ -1,20 +1,19 @@
 local bm = require("santoku.bitmap.capi")
-local create = bm.create
-local extend = bm.extend
-
+local num = require("santoku.num")
 local tbl = require("santoku.table")
-local merge = tbl.merge
 
 local function raw_matrix (bs, step, s, e)
-  local b0 = create()
+  local b0 = bm.create()
+  step = num.ceil(step / bm.chunk_bits) * bm.chunk_bits
   local idx = 1
   s = s or 1
   e = e or #bs
   for i = s, e do
-    extend(b0, bs[i], idx)
+    bm.extend(b0, bs[i], idx)
     idx = idx + step
   end
-  return bm.raw(b0, #bs * step)
+  local r = bm.raw(b0, #bs * step)
+  return r
 end
 
 local function next (b, i)
@@ -36,7 +35,7 @@ local function hamming (a, b, t)
   return bm.cardinality(t)
 end
 
-return merge({
+return tbl.merge({
   raw_matrix = raw_matrix,
   next = next,
   hamming = hamming,
