@@ -150,9 +150,7 @@ static int raw (lua_State *L)
   } else {
     bits = roaring_bitmap_maximum(bm) + 1;
   }
-  uint32_t chunks =
-    (bits / (sizeof(uint32_t) * CHAR_BIT)) +
-    (bits % (sizeof(uint32_t) * CHAR_BIT) > 0);
+  uint32_t chunks = (bits - 1) / (sizeof(uint32_t) * CHAR_BIT) + 1;
   raw_state_t state;
   state.raw = malloc(sizeof(uint32_t) * chunks);
   memset(state.raw, 0, sizeof(uint32_t) * chunks);
