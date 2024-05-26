@@ -183,6 +183,19 @@ static int from_raw (lua_State *L)
   return 1;
 }
 
+static int copy (lua_State *L)
+{
+  lua_settop(L, 1);
+  roaring_bitmap_t *bm0 = peek(L, 1);
+  roaring_bitmap_t *bm1 = roaring_bitmap_copy(bm0);
+  roaring_bitmap_t **bmp = (roaring_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring_bitmap_t *)); // s, b
+  *bmp = bm1;
+  luaL_getmetatable(L, MT); // s, b, mt
+  lua_setmetatable(L, -2); // s, b
+  return 1;
+}
+
 static int tostring (lua_State *L)
 {
   lua_settop(L, 2);
@@ -264,9 +277,30 @@ static int extend (lua_State *L)
   return 0;
 }
 
+static int flip (lua_State *L)
+{
+  lua_settop(L, 3);
+  roaring_bitmap_t *bm = peek(L, 1);
+  lua_Integer bit = luaL_checkinteger(L, 2);
+  bit --;
+  if (bit < 0)
+    luaL_error(L, "bit index must be greater than zero");
+  if (lua_type(L, 3) != LUA_TNIL) {
+    lua_Integer until = luaL_checkinteger(L, 3);
+    until --;
+    if (until < bit)
+      luaL_error(L, "end index must be greater than start index");
+    roaring_bitmap_flip(bm, bit, until);
+  } else {
+    roaring_bitmap_flip(bm, 0, bit);
+  }
+  return 0;
+}
+
 static luaL_Reg fns[] =
 {
   { "create", create },
+  { "copy", copy },
   { "destroy", destroy },
   { "set", set },
   { "get", get },
@@ -282,6 +316,7 @@ static luaL_Reg fns[] =
   { "and", and },
   { "or", or },
   { "xor", xor },
+  { "flip", flip },
   { "extend", extend },
   { NULL, NULL }
 };
