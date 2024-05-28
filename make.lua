@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.13-1",
+  version = "0.0.14-1",
   variable_prefix = "TK_BITMAP",
   public = true,
 

@@ -290,9 +290,9 @@ static int flip (lua_State *L)
     until --;
     if (until < bit)
       luaL_error(L, "end index must be greater than start index");
-    roaring_bitmap_flip(bm, bit, until);
+    roaring_bitmap_flip_inplace(bm, bit, until + 1);
   } else {
-    roaring_bitmap_flip(bm, 0, bit);
+    roaring_bitmap_flip_inplace(bm, 0, bit + 1);
   }
   return 0;
 }

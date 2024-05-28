@@ -86,3 +86,12 @@ test("raw, from_raw", function ()
   assert(eq(bm.tostring(b, 9), "10100000100000000000000000000000"))
 
 end)
+
+test("flip", function ()
+
+  local b = bm.create({ [1] = true, [3] = true, [9] = true }, 9)
+  print(bm.tostring(b, 9))
+  bm.flip(b, 1, 9)
+  print(bm.tostring(b, 9))
+
+end)
