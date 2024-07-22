@@ -90,13 +90,21 @@ static int tk_bitmap_set (lua_State *L)
 
 static int tk_bitmap_unset (lua_State *L)
 {
-  lua_settop(L, 2);
+  lua_settop(L, 3);
   roaring64_bitmap_t *bm = peek(L, 1);
   lua_Integer bit = luaL_checkinteger(L, 2);
   bit --;
   if (bit < 0)
     luaL_error(L, "bit index must be greater than zero");
-  roaring64_bitmap_remove(bm, bit);
+  if (lua_type(L, 3) != LUA_TNIL) {
+    lua_Integer until = luaL_checkinteger(L, 3);
+    until --;
+    if (until < bit)
+      luaL_error(L, "end index must be greater than start index");
+    roaring64_bitmap_remove_range_closed(bm, bit, until);
+  } else {
+    roaring64_bitmap_remove(bm, bit);
+  }
   return 0;
 }
 
