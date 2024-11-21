@@ -208,6 +208,8 @@ static int tk_bitmap_copy (lua_State *L)
   lua_settop(L, 1);
   roaring64_bitmap_t *bm0 = peek(L, 1);
   roaring64_bitmap_t *bm1 = roaring64_bitmap_copy(bm0);
+  if (bm1 == NULL)
+    luaL_error(L, "memory error creating bitmap");
   roaring64_bitmap_t **bmp = (roaring64_bitmap_t **)
     lua_newuserdata(L, sizeof(roaring64_bitmap_t *)); // s, b
   *bmp = bm1;
