@@ -1,0 +1,6 @@
+results.mk: Makefile
+	[ -d svdlibc ] && rm -rf svdlibc || true
+	git clone --depth 1 https://github.com/lucasmaystre/svdlibc.git
+	cd svdlibc && make
+	echo "LIB_CFLAGS += -I$(PWD)/deps/svdlibc/svdlibc" >> results.mk
+	echo "LIB_LDFLAGS += -L$(PWD)/deps/svdlibc/svdlibc -lsvd" >> results.mk

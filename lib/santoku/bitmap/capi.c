@@ -2,9 +2,12 @@
 #include "lauxlib.h"
 #include "roaring.h"
 #include "roaring.c"
+#include "svdlib.h"
 #include <string.h>
 
 #define MT "santoku_bitmap"
+
+extern long SVDVerbosity;
 
 static roaring64_bitmap_t *peek (lua_State *L, int i)
 {
@@ -319,6 +322,63 @@ static int tk_bitmap_flip (lua_State *L)
   return 0;
 }
 
+static inline SMat tk_bitmap_to_smat (lua_State *L, roaring64_bitmap_t *bm, lua_Integer in_rows, lua_Integer in_cols)
+{
+  SMat S;
+  int i, j, n;
+  n = roaring64_bitmap_get_cardinality(bm);
+  S = svdNewSMat(in_rows, in_cols, n);
+  if (!S)
+    luaL_error(L, "error in malloc for smat");
+  for (j = 0, n = 0; j < in_cols; j ++) {
+    S->pointr[j] = n;
+    for (i = 0; i < in_rows; i++) {
+      lua_Integer bit  = (i * in_cols) + j;
+      if (roaring64_bitmap_contains(bm, bit)) {
+        S->rowind[n] = i;
+        S->value[n] = 1;
+        n ++;
+      }
+    }
+  }
+  S->pointr[S->cols] = S->vals;
+  return S;
+}
+
+static inline int tk_bitmap_pca (lua_State *L)
+{
+  roaring64_bitmap_t *bm = peek(L, 1);
+  lua_Integer in_rows = luaL_checkinteger(L, 2);
+  lua_Integer in_cols = luaL_checkinteger(L, 3);
+  lua_Integer out_cols = luaL_checkinteger(L, 4);
+  int iterations = luaL_checkinteger(L, 5);
+  SVDRec R = NULL;
+  SMat A = tk_bitmap_to_smat(L, bm, in_rows, in_cols);
+  double las2end[2] = {-1.0e-30, 1.0e-30};
+  double kappa = 1e-6;
+  out_cols = out_cols <= 0 ? (A->rows < A->cols ? A->rows : A->cols) : out_cols;
+  if (!(R = svdLAS2(A, out_cols, iterations, las2end, kappa))) {
+    svdFreeSMat(A);
+    return luaL_error(L, "error in svdLAS2");
+  }
+  svdFreeSMat(A);
+  roaring64_bitmap_t *bm0 = roaring64_bitmap_create();
+  if (bm == NULL)
+    luaL_error(L, "memory error creating bitmap");
+  roaring64_bitmap_t **bm0p = (roaring64_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring64_bitmap_t *));
+  *bm0p = bm0;
+  luaL_getmetatable(L, MT);
+  lua_setmetatable(L, -2);
+  for (lua_Integer i = 0; i < R->Vt->rows; i ++)
+    for (lua_Integer j = 0; j < R->Vt->cols; j ++)
+      if (R->Vt->value[i][j] > 0)
+        roaring64_bitmap_add(bm0, i * R->Vt->cols + j);
+  lua_pushinteger(L, R->Vt->cols);
+  svdFreeSVDRec(R);
+  return 2;
+}
+
 static luaL_Reg fns[] =
 {
   { "create", tk_bitmap_create },
@@ -340,11 +400,13 @@ static luaL_Reg fns[] =
   { "xor", tk_bitmap_xor },
   { "flip", tk_bitmap_flip },
   { "extend", tk_bitmap_extend },
+  { "pca", tk_bitmap_pca },
   { NULL, NULL }
 };
 
 int luaopen_santoku_bitmap_capi (lua_State *L)
 {
+  SVDVerbosity = 0;
   lua_newtable(L); // t
   luaL_register(L, NULL, fns); // t
   lua_pushinteger(L, sizeof(uint32_t) * CHAR_BIT); // t i

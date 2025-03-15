@@ -105,3 +105,24 @@ test("set/unset many", function ()
   bm.unset(c, 17, 32)
   assert(eq(bm.hamming(b, c), 16))
 end)
+
+-- test("pca", function ()
+--   local a_full = bm.create()
+--   local b_full = bm.create()
+--   local rows = 1000
+--   local full_columns = 10000
+--   local reduced_columns = 100
+--   local rand = require("santoku.random")
+--   for i = 1, rows * full_columns do
+--     if rand.num() > 0.5 then
+--       bm.set(a_full, i)
+--     end
+--     if rand.num() > 0.5 then
+--       bm.set(b_full, i)
+--     end
+--   end
+--   local a_reduced = bm.pca(a_full, rows, full_columns, reduced_columns, 1000)
+--   local b_reduced = bm.pca(b_full, rows, full_columns, reduced_columns, 1000)
+--   print(bm.hamming(a_full, b_full) / (full_columns * rows))
+--   print(bm.hamming(a_reduced, b_reduced) / (reduced_columns * rows))
+-- end)
