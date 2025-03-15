@@ -107,22 +107,30 @@ test("set/unset many", function ()
 end)
 
 -- test("pca", function ()
---   local a_full = bm.create()
---   local b_full = bm.create()
---   local rows = 1000
---   local full_columns = 10000
---   local reduced_columns = 100
 --   local rand = require("santoku.random")
---   for i = 1, rows * full_columns do
---     if rand.num() > 0.5 then
---       bm.set(a_full, i)
---     end
---     if rand.num() > 0.5 then
---       bm.set(b_full, i)
+--   local originals = {}
+--   local n_iterations = 1000
+--   local n_docs = 1000
+--   local n_cols_full = 1000
+--   local n_cols_reduced = 100
+--   for i = 1, n_docs do
+--     originals[i] = bm.create()
+--     for j = 1, n_cols_full do
+--       if rand.num() > 0.9 then
+--         bm.set(originals[i], j)
+--       end
 --     end
 --   end
---   local a_reduced = bm.pca(a_full, rows, full_columns, reduced_columns, 1000)
---   local b_reduced = bm.pca(b_full, rows, full_columns, reduced_columns, 1000)
---   print(bm.hamming(a_full, b_full) / (full_columns * rows))
---   print(bm.hamming(a_reduced, b_reduced) / (reduced_columns * rows))
+--   local corpus = bm.matrix(originals, n_cols_full)
+--   local encode = bm.pca(corpus, n_docs, n_cols_full, n_cols_reduced, n_iterations)
+--   local encoded = {}
+--   for i = 1, n_docs do
+--     encoded[i] = encode(originals[i], n_cols_full)
+--   end
+--   for i = 1, n_docs do
+--     local j = rand.num(1, n_docs)
+--     print(i, j,
+--       bm.hamming(originals[i], originals[j]) / n_cols_full,
+--       bm.hamming(encoded[i], encoded[j]) / n_cols_reduced)
+--   end
 -- end)
