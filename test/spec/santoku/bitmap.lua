@@ -105,32 +105,3 @@ test("set/unset many", function ()
   bm.unset(c, 17, 32)
   assert(eq(bm.hamming(b, c), 16))
 end)
-
--- test("pca", function ()
---   local rand = require("santoku.random")
---   local originals = {}
---   local n_iterations = 1000
---   local n_docs = 1000
---   local n_cols_full = 1000
---   local n_cols_reduced = 100
---   for i = 1, n_docs do
---     originals[i] = bm.create()
---     for j = 1, n_cols_full do
---       if rand.num() > 0.9 then
---         bm.set(originals[i], j)
---       end
---     end
---   end
---   local corpus = bm.matrix(originals, n_cols_full)
---   local encode = bm.pca(corpus, n_docs, n_cols_full, n_cols_reduced, n_iterations)
---   local encoded = {}
---   for i = 1, n_docs do
---     encoded[i] = encode(originals[i], n_cols_full)
---   end
---   for i = 1, n_docs do
---     local j = rand.num(1, n_docs)
---     print(i, j,
---       bm.hamming(originals[i], originals[j]) / n_cols_full,
---       bm.hamming(encoded[i], encoded[j]) / n_cols_reduced)
---   end
--- end)
