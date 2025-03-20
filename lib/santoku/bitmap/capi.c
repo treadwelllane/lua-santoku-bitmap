@@ -471,36 +471,38 @@ static int tk_compressor_destroy (lua_State *L)
 static inline int tk_bitmap_compress (lua_State *);
 
 static inline void tk_compressor_logsumexp (
-  double *log_p_y_given_x_unnorm,
+  double *restrict log_p_y_given_x_unnorm,
+  double *restrict log_z,
   unsigned int n_hidden,
-  unsigned int n_samples,
-  double *log_z
+  unsigned int n_samples
 ) {
-  for (unsigned int s = 0; s < n_samples; s++) {
-    for (unsigned int h = 0; h < n_hidden; h++) {
-      double a = log_p_y_given_x_unnorm[h * n_samples * 2 + s * 2 + 0];
-      double b = log_p_y_given_x_unnorm[h * n_samples * 2 + s * 2 + 1];
-      double max_ab  = (a > b)? a : b;
-      double sum_exp = exp(a - max_ab) + exp(b - max_ab);
-      log_z[h * n_samples + s] = max_ab + log(sum_exp);
-    }
+  double *restrict offset0 = log_p_y_given_x_unnorm + 0 * n_hidden * n_samples;
+  double *restrict offset1 = log_p_y_given_x_unnorm + 1 * n_hidden * n_samples;
+  for (unsigned int i = 0; i < n_hidden * n_samples; i ++) {
+    double a = offset0[i];
+    double b = offset1[i];
+    double max_ab  = (a > b) ? a : b;
+    double sum_exp = exp(a - max_ab) + exp(b - max_ab);
+    log_z[i] = max_ab + log(sum_exp);
   }
 }
 
 static void tk_compressor_normalize_latent (
-  double *log_z,
-  double *p_y_given_x,
-  double *log_p_y_given_x_unnorm,
+  double *restrict log_z,
+  double *restrict p_y_given_x,
+  double *restrict log_p_y_given_x_unnorm,
   unsigned int n_hidden,
   unsigned int n_samples
 ) {
-  tk_compressor_logsumexp(log_p_y_given_x_unnorm, n_hidden, n_samples, log_z);
-  for (unsigned int h = 0; h < n_hidden; h ++)
-    for (unsigned int s = 0; s < n_samples; s ++)
-      for (unsigned int d = 0; d < 2; d ++)
-        p_y_given_x[h * n_samples * 2 + s * 2 + d] =
-          exp(log_p_y_given_x_unnorm[h * n_samples * 2 + s * 2 + d] -
-              log_z[h * n_samples + s]);
+  tk_compressor_logsumexp(log_p_y_given_x_unnorm, log_z, n_hidden, n_samples);
+  double *restrict pyx_offset0 = p_y_given_x + 0 * n_hidden * n_samples;
+  double *restrict pyx_offset1 = p_y_given_x + 1 * n_hidden * n_samples;
+  double *restrict pyxu_offset0 = log_p_y_given_x_unnorm + 0 * n_hidden * n_samples;
+  double *restrict pyxu_offset1 = log_p_y_given_x_unnorm + 1 * n_hidden * n_samples;
+  for (unsigned int i = 0; i < n_hidden * n_samples; i ++)
+    pyx_offset0[i] = exp(pyxu_offset0[i] - log_z[i]);
+  for (unsigned int i = 0; i < n_hidden * n_samples; i ++)
+    pyx_offset1[i] = exp(pyxu_offset1[i] - log_z[i]);
 }
 
 static inline void tk_compressor_data_stats (
@@ -535,8 +537,8 @@ static inline void tk_compressor_calculate_p_y (
     double pseudo_counts_0 = 0.001;
     double pseudo_counts_1 = 0.001;
     for (unsigned int s = 0; s < n_samples; ++s) {
-      pseudo_counts_0 += p_y_given_x[(h * n_samples + s) * 2 + 0];
-      pseudo_counts_1 += p_y_given_x[(h * n_samples + s) * 2 + 1];
+      pseudo_counts_0 += p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
+      pseudo_counts_1 += p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
     }
     double sum_pseudo_counts = pseudo_counts_0 + pseudo_counts_1;
     log_p_y[h * 2 + 0] = log(pseudo_counts_0) - log(sum_pseudo_counts);
@@ -557,8 +559,8 @@ static void tk_compressor_calculate_p_y_xi (
   memset(pseudo_counts, 0, n_hidden * n_visible * 2 * 2 * sizeof(double));
   for (unsigned int s = 0; s < n_samples; s++) {
     for (unsigned int h = 0; h < n_hidden; h++) {
-      double py0 = p_y_given_x[h * n_samples * 2 + s * 2 + 0];
-      double py1 = p_y_given_x[h * n_samples * 2 + s * 2 + 1];
+      double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
+      double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
       for (unsigned int v = 0; v < n_visible; v++) {
         pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 0] += py0;
         pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 1] += py1;
@@ -570,8 +572,8 @@ static void tk_compressor_calculate_p_y_xi (
     uint64_t s = b / n_visible;
     uint64_t v = b % n_visible;
     for (unsigned int h = 0; h < n_hidden; h++) {
-      double py0 = p_y_given_x[h * n_samples * 2 + s * 2 + 0];
-      double py1 = p_y_given_x[h * n_samples * 2 + s * 2 + 1];
+      double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
+      double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
       pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] += py0;
       pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1] += py1;
       pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] -= py0;
@@ -757,7 +759,7 @@ static inline void tk_compressor_calculate_latent(
           s_adjusted = s_adjusted - w * val_absent + w * val_present;
           r++;
         }
-        log_p_y_given_x_unnorm[h * n_samples * 2 + i * 2 + d] = s_adjusted + log_p_y[h * 2 + d];
+        log_p_y_given_x_unnorm[d * n_hidden * n_samples + h * n_samples + i] = s_adjusted + log_p_y[h * 2 + d];
       }
     }
     unsigned int r2 = p;
@@ -796,10 +798,10 @@ static inline int tk_bitmap_compress (lua_State *L)
   *bm0p = bm0;
   luaL_getmetatable(L, MT);
   lua_setmetatable(L, -2);
-  for (unsigned int h = 0; h < compressor->n_hidden; ++h) {
-    for (unsigned int s = 0; s < n_samples; ++s) {
-      double py0 = compressor->p_y_given_x[h * n_samples * 2 + s * 2 + 0];
-      double py1 = compressor->p_y_given_x[h * n_samples * 2 + s * 2 + 1];
+  for (unsigned int h = 0; h < compressor->n_hidden; h ++) {
+    for (unsigned int s = 0; s < n_samples; s ++) {
+      double py0 = compressor->p_y_given_x[0 * compressor->n_hidden * n_samples + h * n_samples + s];
+      double py1 = compressor->p_y_given_x[1 * compressor->n_hidden * n_samples + h * n_samples + s];
       if (py1 > py0)
         roaring64_bitmap_add(bm0, s * compressor->n_hidden + h);
     }
@@ -866,7 +868,7 @@ static inline void tk_compressor_init_log_p_y_given_x_unnorm (
   unsigned int n_samples
 ) {
   double log_dim_hidden = -log(2);
-  for (unsigned int i = 0; i < n_hidden * n_samples * 2; ++i)
+  for (unsigned int i = 0; i < 2 * n_hidden * n_samples; ++i)
     log_p_y_given_x_unnorm[i] = log_dim_hidden * (0.5 + fast_drand());
 }
 
@@ -922,8 +924,8 @@ static inline void tk_compressor_init (
     compressor->log_p_y_given_x_unnorm,
     compressor->n_hidden,
     n_samples);
-  compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->vec = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
+  compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->log_marg_xi = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
   compressor->pseudo_counts = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->mis = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
