@@ -8,6 +8,13 @@
 
 #define MT "santoku_bitmap"
 
+static inline int tk_lua_absindex (lua_State *L, int i)
+{
+  if (i < 0 && i > LUA_REGISTRYINDEX)
+    i += lua_gettop(L) + 1;
+  return i;
+}
+
 static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
 {
   lua_Integer l = luaL_checkinteger(L, i);
@@ -28,17 +35,6 @@ static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int
 static roaring64_bitmap_t *peek (lua_State *L, int i)
 {
   return *((roaring64_bitmap_t **) luaL_checkudata(L, i, MT));
-}
-
-static void tk_bitmap_iterate (
-  roaring64_bitmap_t *bm,
-  bool (*it)(uint64_t, void *),
-  void *udata
-) {
-  for (uint64_t i = roaring64_bitmap_minimum(bm); i <= roaring64_bitmap_maximum(bm); i ++)
-    if (roaring64_bitmap_contains(bm, i))
-      if (!it(i, udata))
-        break;
 }
 
 static int tk_bitmap_destroy (lua_State *L)
@@ -178,11 +174,13 @@ static int tk_bitmap_raw (lua_State *L)
   roaring64_bitmap_t *bm = peek(L, 1);
   uint64_t bits;
   if (lua_type(L, 2) != LUA_TNIL) {
-    bits = luaL_checkinteger(L, 2);
-    if (bits < 0) {
+    lua_Integer bs = luaL_checkinteger(L, 2);
+    if (bs < 0) {
       return luaL_error(L, "number of bits can't be negative");
     } else if (bits > UINT64_MAX) {
       return luaL_error(L, "number of bits can't be greater than UINT64_MAX");
+    } else {
+      bits = (uint64_t) bs;
     }
   } else if (roaring64_bitmap_get_cardinality(bm) == 0) {
     bits = 0;
@@ -193,7 +191,7 @@ static int tk_bitmap_raw (lua_State *L)
   raw_state_t state;
   state.raw = malloc(sizeof(uint32_t) * chunks);
   memset(state.raw, 0, sizeof(uint32_t) * chunks);
-  tk_bitmap_iterate(bm, tk_bitmap_raw_iter, &state);
+  roaring64_bitmap_iterate(bm, tk_bitmap_raw_iter, &state);
   if (state.raw == NULL)
     luaL_error(L, "error in malloc");
   lua_pushlstring(L, (char *) state.raw, sizeof(uint32_t) * chunks);
@@ -247,7 +245,7 @@ static int tk_bitmap_bits (lua_State *L)
   lua_newtable(L); // bm bits t
   lua_insert(L, 2); // bm t bits
   lua_pushinteger(L, 1); // bm t bits n
-  tk_bitmap_iterate(bm, tk_bitmap_bits_iter, L); // bm t bits n
+  roaring64_bitmap_iterate(bm, tk_bitmap_bits_iter, L); // bm t bits n
   lua_pushnil(L); // bm t bits n nil
   lua_settable(L, -4); // bm t bits
   lua_pop(L, 1);
@@ -329,7 +327,7 @@ static int tk_bitmap_extend (lua_State *L)
   extend_state_t state;
   state.n = n;
   state.bm = bm0;
-  tk_bitmap_iterate(bm1, tk_bitmap_extend_iter, &state);
+  roaring64_bitmap_iterate(bm1, tk_bitmap_extend_iter, &state);
   return 0;
 }
 
@@ -373,7 +371,6 @@ typedef struct {
   double *tc_history;
   double *tcs;
   double *vec;
-  double log_dim_hidden;
   double eps;
   double lam;
   double tmin;
@@ -510,32 +507,24 @@ static void tk_compressor_normalize_latent (
 }
 
 static inline void tk_compressor_data_stats (
-  roaring64_bitmap_t *bm,
+  uint64_t cardinality,
+  uint64_t *bits,
   double *p_x,
   double *entropy_x,
-  double eps,
   unsigned int n_samples,
   unsigned int n_visible
 ) {
-  for (unsigned int i = 0; i < n_visible; i++) {
-    double count1 = 0.0;
-    for (unsigned int j = 0; j < n_samples; j++)
-      if (roaring64_bitmap_contains(bm, j * n_visible + i))
-        count1 += 1.0;
-    double count0 = (double) n_samples - count1;
-    double total = count0 + count1;
-    p_x[i * 2 + 0] = count0 / total;
-    p_x[i * 2 + 1] = count1 / total;
-  }
-  for (unsigned int i = 0; i < n_visible; i++) {
-    double p0 = p_x[i * 2 + 0];
-    double p1 = p_x[i * 2 + 1];
-    double entropy = 0.0;
-    if (p0 > 0.0)
-      entropy -= p0 * log(p0);
-    if (p1 > 0.0)
-      entropy -= p1 * log(p1);
-    entropy_x[i] = (entropy > 0.0) ? entropy : 1e-10;
+  for (unsigned int v = 0; v < n_visible; v ++)
+    p_x[v] = 0;
+  for (uint64_t c = 0; c < cardinality; c ++)
+    p_x[bits[c] % n_visible] ++;
+  for (unsigned int v = 0; v < n_visible; v ++)
+    p_x[v] /= (double) n_samples;
+  for (unsigned int v = 0; v < n_visible; v ++) {
+    double entropy = 0;
+    entropy -= p_x[v] * log(p_x[v]); // prob. set
+    entropy -= (1 - p_x[v]) * log(p_x[v]); // prob. unset
+    entropy_x[v] = entropy > 0 ? entropy : 1e-10;
   }
 }
 
@@ -559,7 +548,8 @@ static inline void tk_compressor_calculate_p_y (
 }
 
 static void tk_compressor_calculate_p_y_xi (
-  roaring64_bitmap_t *bm,
+  uint64_t cardinality,
+  uint64_t *bits,
   double *log_marg,
   double *pseudo_counts,
   double *p_y_given_x,
@@ -567,45 +557,46 @@ static void tk_compressor_calculate_p_y_xi (
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
-  const unsigned int dim_hidden = 2;
-  const unsigned int n_events = n_visible * 2;
-  const double smoothing = 0.001;
-  for (unsigned int j = 0; j < n_visible; j++) {
-    unsigned int event0 = 2 * j;
-    unsigned int event1 = event0 + 1;
+  memset(pseudo_counts, 0, n_hidden * n_visible * 2 * 2 * sizeof(double));
+  for (unsigned int s = 0; s < n_samples; s++) {
     for (unsigned int h = 0; h < n_hidden; h++) {
-      double sum0_dim0 = 0.0, sum0_dim1 = 0.0;
-      double sum1_dim0 = 0.0, sum1_dim1 = 0.0;
-      for (unsigned int k = 0; k < n_samples; k++) {
-        unsigned int base_idx = (h * n_samples + k) * dim_hidden;
-        double py0 = p_y_given_x[base_idx + 0];
-        double py1 = p_y_given_x[base_idx + 1];
-        uint64_t index = ((uint64_t)k) * n_visible + j;
-        if (roaring64_bitmap_contains(bm, index)) {
-          sum1_dim0 += py0;
-          sum1_dim1 += py1;
-        } else {
-          sum0_dim0 += py0;
-          sum0_dim1 += py1;
-        }
+      double py0 = p_y_given_x[h * n_samples * 2 + s * 2 + 0];
+      double py1 = p_y_given_x[h * n_samples * 2 + s * 2 + 1];
+      for (unsigned int v = 0; v < n_visible; v++) {
+        pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 0] += py0;
+        pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 1] += py1;
       }
-      unsigned int idx0 = (h * n_events + event0) * dim_hidden;
-      unsigned int idx1 = (h * n_events + event1) * dim_hidden;
-      pseudo_counts[idx0 + 0] = sum0_dim0 + smoothing;
-      pseudo_counts[idx0 + 1] = sum0_dim1 + smoothing;
-      pseudo_counts[idx1 + 0] = sum1_dim0 + smoothing;
-      pseudo_counts[idx1 + 1] = sum1_dim1 + smoothing;
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    for (unsigned int e = 0; e < n_events; e++) {
-      unsigned int base = (h * n_events + e) * dim_hidden;
-      double total = pseudo_counts[base] + pseudo_counts[base + 1];
-      double log_total = log(total);
-      for (unsigned int d = 0; d < dim_hidden; d++) {
-        unsigned int idx = base + d;
-        log_marg[idx] = log(pseudo_counts[idx]) - log_total;
-      }
+  for (uint64_t c = 0; c < cardinality; c++) {
+    uint64_t b = bits[c];
+    uint64_t s = b / n_visible;
+    uint64_t v = b % n_visible;
+    for (unsigned int h = 0; h < n_hidden; h++) {
+      double py0 = p_y_given_x[h * n_samples * 2 + s * 2 + 0];
+      double py1 = p_y_given_x[h * n_samples * 2 + s * 2 + 1];
+      pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] += py0;
+      pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1] += py1;
+      pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] -= py0;
+      pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1] -= py1;
+    }
+  }
+  for (size_t i = 0; i < n_hidden * n_visible * 2 * 2; i++)
+    pseudo_counts[i] += 0.001;
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      double total0 =
+        pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] +
+        pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1];
+      double total1 =
+        pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] +
+        pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1];
+      double log_total0 = log(total0);
+      double log_total1 = log(total1);
+      log_marg[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0]) - log_total0;
+      log_marg[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1]) - log_total0;
+      log_marg[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0]) - log_total1;
+      log_marg[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1]) - log_total1;
     }
   }
 }
@@ -645,8 +636,8 @@ static inline void tk_compressor_calculate_mis (
       unsigned int idx0 = h * n_events + j * 2 + 0;
       unsigned int idx1 = h * n_events + j * 2 + 1;
       double weighted_sum =
-        smis[idx0] * p_x[j * 2 + 0] +
-        smis[idx1] * p_x[j * 2 + 1];
+        smis[idx0] * (1 - p_x[j]) +
+        smis[idx1] * (p_x[j]);
       mis[h * n_visible + j] = weighted_sum;
     }
   }
@@ -658,7 +649,8 @@ static inline void tk_compressor_calculate_mis (
 }
 
 static inline void tk_compressor_update_marginals (
-  roaring64_bitmap_t *bm,
+  uint64_t cardinality,
+  uint64_t *bits,
   double *log_p_y,
   double *log_marg,
   double *pseudo_counts,
@@ -669,7 +661,7 @@ static inline void tk_compressor_update_marginals (
   unsigned int n_hidden
 ) {
   tk_compressor_calculate_p_y(log_p_y, p_y_given_x, n_samples, n_hidden);
-  tk_compressor_calculate_p_y_xi(bm, log_marg, pseudo_counts, p_y_given_x, n_samples, n_visible, n_hidden);
+  tk_compressor_calculate_p_y_xi(cardinality, bits, log_marg, pseudo_counts, p_y_given_x, n_samples, n_visible, n_hidden);
   for (unsigned int h = 0; h < n_hidden; h++) {
     for (unsigned int e = 0; e < n_visible * 2; e++) {
       for (unsigned int d = 0; d < 2; d++) {
@@ -727,8 +719,9 @@ static inline void tk_compressor_update_tc (
   tc_history[i] = sum0;
 }
 
-static inline void tk_compressor_calculate_latent (
-  roaring64_bitmap_t *bm,
+static inline void tk_compressor_calculate_latent(
+  uint64_t cardinality,
+  uint64_t *bits,
   double *alpha,
   double *p_y_given_x,
   double *log_z,
@@ -740,20 +733,40 @@ static inline void tk_compressor_calculate_latent (
   unsigned int n_hidden
 ) {
   unsigned int n_events = n_visible * 2;
-  for (unsigned int i = 0; i < n_samples; i++) {
-    for (unsigned int h = 0; h < n_hidden; h++) {
+  unsigned int p = 0;
+  for (unsigned int i = 0; i < n_samples; i ++) {
+    uint64_t sample_offset = (uint64_t)i * n_visible;
+    uint64_t sample_end = sample_offset + n_visible;
+    while (p < cardinality && bits[p] < sample_offset)
+      p++;
+    for (unsigned int h = 0; h < n_hidden; h ++) {
       for (unsigned int d = 0; d < 2; d++) {
         double s = 0.0;
-        for (unsigned int e = 0; e < n_events; e++) {
-          unsigned int j = e / 2;
-          unsigned int state = e % 2;
-          int has_feature = roaring64_bitmap_contains(bm, ((uint64_t)i) * n_visible + j);
-          double X_val = state ? (has_feature ? 1 : 0) : (has_feature ? 0 : 1);
-          s += X_val * alpha[h * n_visible + j] * log_marg[h * n_events * 2 + e * 2 + d];
+        for (unsigned int j = 0; j < n_visible; j ++) {
+          unsigned int e_absent = 2 * j;
+          double val_absent = log_marg[(h * (n_events * 2)) + (e_absent * 2) + d];
+          s += alpha[h * n_visible + j] * val_absent;
         }
-        log_p_y_given_x_unnorm[h * n_samples * 2 + i * 2 + d] = s + log_p_y[h * 2 + d];
+        unsigned int r = p;
+        double s_adjusted = s;
+        while (r < cardinality && bits[r] < sample_end) {
+          uint64_t global_bit = bits[r];
+          unsigned int j = (unsigned int)(global_bit - sample_offset);
+          unsigned int e_absent  = 2 * j;
+          unsigned int e_present = e_absent + 1;
+          double val_absent  = log_marg[(h * (n_events * 2)) + (e_absent  * 2) + d];
+          double val_present = log_marg[(h * (n_events * 2)) + (e_present * 2) + d];
+          double w = alpha[h * n_visible + j];
+          s_adjusted = s_adjusted - w * val_absent + w * val_present;
+          r++;
+        }
+        log_p_y_given_x_unnorm[h * n_samples * 2 + i * 2 + d] = s_adjusted + log_p_y[h * 2 + d];
       }
     }
+    unsigned int r2 = p;
+    while (r2 < cardinality && bits[r2] < sample_end)
+      r2++;
+    p = r2;
   }
   tk_compressor_normalize_latent(log_z, p_y_given_x, log_p_y_given_x_unnorm, n_hidden, n_samples);
 }
@@ -762,9 +775,12 @@ static inline int tk_bitmap_compress (lua_State *L)
 {
   tk_compressor_t *compressor = peek_compressor(L, lua_upvalueindex(1));
   roaring64_bitmap_t *bm = peek(L, 1);
+  uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
+  uint64_t *bits = malloc(cardinality * sizeof(uint64_t));
+  roaring64_bitmap_to_uint64_array(bm, bits);
   unsigned int n_samples = tk_lua_optunsigned(L, 2, 1);
   tk_compressor_calculate_latent(
-    bm,
+    cardinality, bits,
     compressor->alpha,
     compressor->p_y_given_x,
     compressor->log_z,
@@ -774,6 +790,7 @@ static inline int tk_bitmap_compress (lua_State *L)
     n_samples,
     compressor->n_visible,
     compressor->n_hidden);
+  free(bits);
   roaring64_bitmap_t *bm0 = roaring64_bitmap_create();
   if (bm0 == NULL)
     luaL_error(L, "memory error creating bitmap");
@@ -827,6 +844,35 @@ static inline bool tk_compressor_converged (
   return fabs(-m0 + m1) < eps;
 }
 
+static inline void tk_compressor_init_alpha (
+  double *alpha,
+  unsigned int n_hidden,
+  unsigned int n_visible
+) {
+  for (int i = 0; i < n_hidden; ++i)
+    for (int j = 0; j < n_visible; ++j) {
+      alpha[i * n_visible + j] = 0.5 + 0.5 * fast_drand();
+    }
+}
+
+static inline void tk_compressor_init_tcs (
+  double *tcs,
+  unsigned int n_hidden
+) {
+  for (unsigned int i = 0; i < n_hidden; i ++)
+    tcs[i] = 0.0;
+}
+
+static inline void tk_compressor_init_log_p_y_given_x_unnorm (
+  double *log_p_y_given_x_unnorm,
+  unsigned int n_hidden,
+  unsigned int n_samples
+) {
+  double log_dim_hidden = -log(2);
+  for (unsigned int i = 0; i < n_hidden * n_samples * 2; ++i)
+    log_p_y_given_x_unnorm[i] = log_dim_hidden * (0.5 + fast_drand());
+}
+
 static inline void tk_compressor_init (
   lua_State *L,
   tk_compressor_t *compressor,
@@ -834,47 +880,51 @@ static inline void tk_compressor_init (
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden,
-  unsigned int max_iter
+  unsigned int max_iter,
+  double eps,
+  int i_each
 ) {
   compressor->n_visible = n_visible;
   compressor->n_hidden = n_hidden;
-  compressor->eps = 1e-6;
   compressor->lam = 0.3;
   compressor->tmin = 1.0;
   compressor->ttc = 500.0;
   compressor->tcs = malloc(compressor->n_hidden * sizeof(double));
-  for (unsigned int i = 0; i < compressor->n_hidden; i ++)
-    compressor->tcs[i] = 0.0;
   compressor->tc_history = malloc(max_iter * sizeof(double));
   compressor->alpha = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
   compressor->alphaopt = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
-  for (int i = 0; i < compressor->n_hidden; ++i)
-    for (int j = 0; j < compressor->n_visible; ++j)
-      compressor->alpha[i * compressor->n_visible + j] = 0.5 + 0.5 * fast_drand();
-  double log_dim_hidden = -log(2);
-  compressor->log_p_y_given_x_unnorm = malloc(compressor->n_hidden * n_samples * 2 * sizeof(double));
-  for (int i = 0; i < compressor->n_hidden; ++i)
-    for (int j = 0; j < n_samples; ++j)
-      for (int k = 0; k < 2; ++k)
-        compressor->log_p_y_given_x_unnorm[i * n_samples * 2 + j * 2 + k] = log_dim_hidden * (0.5 + fast_drand());
+  compressor->p_y_given_x = malloc(2 * compressor->n_hidden * n_samples * sizeof(double));
+  compressor->log_p_y_given_x_unnorm = malloc(2 * compressor->n_hidden * n_samples * sizeof(double));
   compressor->log_z = malloc(compressor->n_hidden * n_samples * sizeof(double));
-  compressor->log_p_y = malloc(compressor->n_hidden * 2 * sizeof(double));
-  compressor->p_y_given_x = malloc(compressor->n_hidden * n_samples * 2 * sizeof(double));
+  compressor->log_p_y = malloc(2 * compressor->n_hidden * sizeof(double));
+  compressor->p_x = malloc(compressor->n_visible * sizeof(double));
+  compressor->entropy_x = malloc(compressor->n_visible * sizeof(double));
+  uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
+  uint64_t *bits = malloc(cardinality * sizeof(uint64_t));
+  roaring64_bitmap_to_uint64_array(bm, bits);
+  tk_compressor_data_stats(
+    cardinality, bits,
+    compressor->p_x,
+    compressor->entropy_x,
+    n_samples,
+    compressor->n_visible);
+  tk_compressor_init_tcs(
+    compressor->tcs,
+    compressor->n_hidden);
+  tk_compressor_init_alpha(
+    compressor->alpha,
+    compressor->n_hidden,
+    compressor->n_visible);
+  tk_compressor_init_log_p_y_given_x_unnorm(
+    compressor->log_p_y_given_x_unnorm,
+    compressor->n_hidden,
+    n_samples);
   tk_compressor_normalize_latent(
     compressor->log_z,
     compressor->p_y_given_x,
     compressor->log_p_y_given_x_unnorm,
     compressor->n_hidden,
     n_samples);
-  compressor->p_x = malloc(compressor->n_visible * 2 * sizeof(double));
-  compressor->entropy_x = malloc(compressor->n_visible * sizeof(double));
-  tk_compressor_data_stats(
-    bm,
-    compressor->p_x,
-    compressor->entropy_x,
-    compressor->eps,
-    n_samples,
-    compressor->n_visible);
   compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->vec = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->log_marg_xi = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
@@ -885,7 +935,7 @@ static inline void tk_compressor_init (
   unsigned int i = 0;
   while (i < max_iter) {
     tk_compressor_update_marginals(
-      bm,
+      cardinality, bits,
       compressor->log_p_y,
       compressor->log_marg,
       compressor->pseudo_counts,
@@ -916,7 +966,7 @@ static inline void tk_compressor_init (
       compressor->n_visible,
       compressor->n_hidden);
     tk_compressor_calculate_latent(
-      bm,
+      cardinality, bits,
       compressor->alpha,
       compressor->p_y_given_x,
       compressor->log_z,
@@ -933,29 +983,41 @@ static inline void tk_compressor_init (
       compressor->tc_history,
       n_samples,
       compressor->n_hidden);
-    if (tk_compressor_converged(i, compressor->eps, compressor->tc_history))
+    bool converged = tk_compressor_converged(i, eps, compressor->tc_history);
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, i + 1);
+      lua_pushnumber(L, compressor->tc_history[i]);
+      lua_pushboolean(L, converged);
+      lua_call(L, 3, 0);
+    }
+    if (converged)
       break;
     else
       i ++;
   }
   tk_compressor_shrink(compressor);
+  free(bits);
 }
 
 static inline int tk_bitmap_compressor (lua_State *L)
 {
-  lua_pushnil(L);
   roaring64_bitmap_t *bm = peek(L, 1);
-  unsigned int n_rows = tk_lua_checkunsigned(L, 2);
-  unsigned int n_cols = tk_lua_checkunsigned(L, 3);
-  unsigned int n_reduced = tk_lua_checkunsigned(L, 4);
+  unsigned int n_samples = tk_lua_checkunsigned(L, 2);
+  unsigned int n_visible = tk_lua_checkunsigned(L, 3);
+  unsigned int n_hidden = tk_lua_checkunsigned(L, 4);
   unsigned int max_iter = tk_lua_checkunsigned(L, 5);
+  double eps = luaL_optnumber(L, 6, 1e-6);
+  unsigned int i_each = -1;
+  if (lua_type(L, 7) != LUA_TNIL)
+    i_each = tk_lua_absindex(L, i_each);
   if (max_iter < 10)
     max_iter = 10;
   tk_compressor_t *compressor = (tk_compressor_t *)
     lua_newuserdata(L, sizeof(tk_compressor_t));
   luaL_getmetatable(L, MT_COMPRESSOR); // t, n, b, mt
   lua_setmetatable(L, -2); // t, n, b
-  tk_compressor_init(L, compressor, bm, n_rows, n_cols, n_reduced, max_iter);
+  tk_compressor_init(L, compressor, bm, n_samples, n_visible, n_hidden, max_iter, eps, i_each);
   lua_pushcclosure(L, tk_bitmap_compress, 1);
   return 1;
 }

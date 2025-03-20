@@ -1,4 +1,5 @@
 local test = require("santoku.test")
+local utc = require("santoku.utc")
 local err = require("santoku.error")
 local assert = err.assert
 local vdt = require("santoku.validate")
@@ -127,8 +128,13 @@ test("compress", function ()
     end
   end
   local corpus = bm.matrix(originals, n_cols_full)
+  local last = utc.time(true)
   local compress = bm.compressor(
-    corpus, n_docs, n_cols_full, n_cols_reduced, n_iterations)
+    corpus, n_docs, n_cols_full, n_cols_reduced, n_iterations, nil, function (...)
+      local now = utc.time(true)
+      print(now - last, ...)
+      last = now
+    end)
   corpus = compress(corpus, n_docs)
   print(">>", bm.tostring(corpus, n_cols_reduced))
 end)
