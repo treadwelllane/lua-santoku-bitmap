@@ -1,10 +1,9 @@
 local bm = require("santoku.bitmap.capi")
-local num = require("santoku.num")
+local arr = require("santoku.array")
 local tbl = require("santoku.table")
 
 local function matrix (bs, step, s, e, rows)
   local b0 = bm.create()
-  step = num.ceil(step / bm.chunk_bits) * bm.chunk_bits
   local idx = 1
   s = s or 1
   e = e or #bs
@@ -45,7 +44,32 @@ local function hamming (a, b, t)
   return bm.cardinality(t)
 end
 
+local function tostring (b, n)
+  n = n or bm.cardinality(b)
+  n = n % 32 == 0 and n or (n + (32 - (n % 32)))
+  local x = 1
+  local t = bm.bits(b, n)
+  local out = {}
+  for i = 1, #t do
+    if i > n then
+      break
+    end
+    local bit = t[i]
+    for j = x, bit - 1 do
+      out[j] = "0"
+    end
+    out[bit] = "1"
+    x = bit + 1
+  end
+  while x <= n do
+    out[x] = "0"
+    x = x + 1
+  end
+  return arr.concat(out)
+end
+
 return tbl.merge({
+  tostring = tostring,
   raw_matrix = raw_matrix,
   matrix = matrix,
   next = next,
