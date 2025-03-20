@@ -495,15 +495,12 @@ static void tk_compressor_normalize_latent (
   unsigned int n_samples
 ) {
   tk_compressor_logsumexp(log_p_y_given_x_unnorm, n_hidden, n_samples, log_z);
-  for (int i = 0; i < n_hidden; ++i) {
-    for (int j = 0; j < n_samples; ++j) {
-      for (int k = 0; k < 2; ++k) {
-        p_y_given_x[i * n_samples  * 2 + j * 2 + k] =
-          exp(log_p_y_given_x_unnorm[i * n_samples * 2 + j * 2 + k] -
-              log_z[i * n_samples + j]);
-      }
-    }
-  }
+  for (unsigned int h = 0; h < n_hidden; h ++)
+    for (unsigned int s = 0; s < n_samples; s ++)
+      for (unsigned int d = 0; d < 2; d ++)
+        p_y_given_x[h * n_samples * 2 + s * 2 + d] =
+          exp(log_p_y_given_x_unnorm[h * n_samples * 2 + s * 2 + d] -
+              log_z[h * n_samples + s]);
 }
 
 static inline void tk_compressor_data_stats (
@@ -692,11 +689,11 @@ static inline void tk_compressor_update_alpha (
       if (mis[h * n_visible + v] > maxmis[v])
         maxmis[v] = mis[h * n_visible + v];
   }
-  for (int i = 0; i < n_hidden; i ++)
-    for (int j = 0; j < n_visible; j ++)
+  for (unsigned int i = 0; i < n_hidden; i ++)
+    for (unsigned int j = 0; j < n_visible; j ++)
       alphaopt[i * n_visible + j] = exp(tcs[i] * (mis[i * n_visible + j] - maxmis[j]));
-  for (int i = 0; i < n_hidden; i ++)
-    for (int j = 0; j < n_visible; j ++)
+  for (unsigned int i = 0; i < n_hidden; i ++)
+    for (unsigned int j = 0; j < n_visible; j ++)
       alpha[i * n_visible + j] = (1.0 - lam) * alpha[i * n_visible + j] + lam * alphaopt[i * n_visible + j];
 }
 
@@ -849,8 +846,8 @@ static inline void tk_compressor_init_alpha (
   unsigned int n_hidden,
   unsigned int n_visible
 ) {
-  for (int i = 0; i < n_hidden; ++i)
-    for (int j = 0; j < n_visible; ++j) {
+  for (unsigned int i = 0; i < n_hidden; ++i)
+    for (unsigned int j = 0; j < n_visible; ++j) {
       alpha[i * n_visible + j] = 0.5 + 0.5 * fast_drand();
     }
 }
