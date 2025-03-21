@@ -360,6 +360,8 @@ typedef struct {
   double *log_p_y_given_x_unnorm;
   double *maxmis;
   double *mis;
+  double *sums;
+  double *sumsa;
   double *p_x;
   double *entropy_x;
   double *p_y_given_x;
@@ -394,6 +396,10 @@ static inline void tk_compressor_shrink (tk_compressor_t *compressor)
     free(compressor->mis);
     compressor->mis = NULL;
   }
+  if (compressor->sums) {
+    free(compressor->sums);
+    compressor->sums = NULL;
+  };
   if (compressor->p_x) {
     free(compressor->p_x);
     compressor->p_x = NULL;
@@ -425,10 +431,6 @@ static int tk_compressor_destroy (lua_State *L)
     free(compressor->alpha);
     compressor->alpha = NULL;
   }
-  if (compressor->alpha) {
-    free(compressor->alpha);
-    compressor->alpha = NULL;
-  }
   if (compressor->log_marg) {
     free(compressor->log_marg);
     compressor->log_marg = NULL;
@@ -445,6 +447,10 @@ static int tk_compressor_destroy (lua_State *L)
     free(compressor->p_y_given_x);
     compressor->p_y_given_x = NULL;
   }
+  if (compressor->sumsa) {
+    free(compressor->sumsa);
+    compressor->sumsa = NULL;
+  };
   return 1;
 }
 
@@ -495,8 +501,7 @@ static inline void tk_compressor_data_stats (
 ) {
   for (unsigned int v = 0; v < n_visible; v ++)
     p_x[v] = 0;
-  // TODO: not vectorized
-  for (uint64_t c = 0; c < cardinality; c ++)
+  for (uint64_t c = 0; c < cardinality; c ++) // not vectorized, aliasing
     p_x[bits[c] % n_visible] ++;
   for (unsigned int v = 0; v < n_visible; v ++)
     p_x[v] /= (double) n_samples;
@@ -514,8 +519,8 @@ static inline void tk_compressor_calculate_p_y (
   unsigned int n_samples,
   unsigned int n_hidden
 ) {
-  // Outer loop not vectorized
-  for (unsigned int h = 0; h < n_hidden; h ++) {
+
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, unsupported outer form
     double *restrict offset0 = p_y_given_x + 0 * n_hidden * n_samples + h * n_samples;
     double *restrict offset1 = p_y_given_x + 1 * n_hidden * n_samples + h * n_samples;
     double pseudo_counts_0 = 0.001;
@@ -535,6 +540,7 @@ static void tk_compressor_calculate_p_y_xi (
   uint64_t *restrict bits,
   double *restrict log_marg,
   double *restrict pseudo_counts,
+  double *restrict log_p_y,
   double *restrict p_y_given_x,
   unsigned int n_samples,
   unsigned int n_visible,
@@ -542,78 +548,83 @@ static void tk_compressor_calculate_p_y_xi (
 ) {
   for (unsigned int i = 0; i < 2 * 2 * n_hidden * n_visible; i ++)
     pseudo_counts[i] = 0;
-  // Outer loop not vectorized
-  for (unsigned int h = 0; h < n_hidden; h++) {
+  double *restrict pc00 = pseudo_counts + 0 * n_hidden * n_visible;
+  double *restrict pc01 = pseudo_counts + 1 * n_hidden * n_visible;
+  double *restrict pc10 = pseudo_counts + 2 * n_hidden * n_visible;
+  double *restrict pc11 = pseudo_counts + 3 * n_hidden * n_visible;
+  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
+  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
+  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
+  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, 2+ inner loops
     double sum_py0 = 0.0;
     double sum_py1 = 0.0;
-    double *restrict pc0 = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict pc1 = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
     double *restrict hpy0s = p_y_given_x + 0 * n_hidden * n_samples + h * n_samples;
     double *restrict hpy1s = p_y_given_x + 1 * n_hidden * n_samples + h * n_samples;
     for (unsigned int s = 0; s < n_samples; s ++)
       sum_py0 += hpy0s[s];
     for (unsigned int s = 0; s < n_samples; s ++)
       sum_py1 += hpy1s[s];
+    double *restrict pc00a = pc00 + h * n_visible;
+    double *restrict pc01a = pc01 + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
-      pc0[v] += sum_py0;
-      pc1[v] += sum_py1;
+      pc00a[v] += sum_py0;
+      pc01a[v] += sum_py1;
     }
   }
-  // Not vectorized
   for (unsigned int h = 0; h < n_hidden; h ++) {
-    for (unsigned int i = 0; i < 4 * n_visible; i ++)
-      log_marg[i] = 0;
-    double *restrict pc00a = log_marg + 0 * n_visible;
-    double *restrict pc01a = log_marg + 1 * n_visible;
-    double *restrict pc10a = log_marg + 2 * n_visible;
-    double *restrict pc11a = log_marg + 3 * n_visible;
-    // Not vectorized due to scatter
-    for (uint64_t c = 0; c < cardinality; c ++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      lm00[v] = 0;
+      lm01[v] = 0;
+      lm10[v] = 0;
+      lm11[v] = 0;
+    }
+    for (uint64_t c = 0; c < cardinality; c ++) { // not vectorzed, gather scatter
       uint64_t b = bits[c];
       uint64_t s = b / n_visible;
       uint64_t v = b % n_visible;
       double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
       double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
-      pc10a[v] += py0;
-      pc11a[v] += py1;
-      pc00a[v] -= py0;
-      pc01a[v] -= py1;
+      lm10[v] += py0;
+      lm11[v] += py1;
+      lm00[v] -= py0;
+      lm01[v] -= py1;
     }
-    double *restrict pc00 = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict pc01 = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
-    double *restrict pc10 = pseudo_counts + ((1 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict pc11 = pseudo_counts + ((1 * 2 + 1) * n_hidden + h) * n_visible;
-    for (unsigned int v = 0; v < n_visible; v++) {
-      pc10[v] += pc10a[v];
-      pc11[v] += pc11a[v];
-      pc00[v] += pc00a[v];
-      pc01[v] += pc01a[v];
+    double *restrict pc00a = pc00 + h * n_visible;
+    double *restrict pc01a = pc01 + h * n_visible;
+    double *restrict pc10a = pc10 + h * n_visible;
+    double *restrict pc11a = pc11 + h * n_visible;
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      pc10a[v] += lm10[v];
+      pc11a[v] += lm11[v];
+      pc00a[v] += lm00[v];
+      pc01a[v] += lm01[v];
     }
   }
-  for (unsigned int i = 0; i < 2 * 2 * n_hidden * n_visible; i ++)
+  for (unsigned int i = 0; i < 2 * 2 * n_hidden * n_visible; i ++) // splitting at boundaries
     pseudo_counts[i] += 0.001;
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    double *restrict pc00a = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict pc01a = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
-    double *restrict pc10a = pseudo_counts + ((1 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict pc11a = pseudo_counts + ((1 * 2 + 1) * n_hidden + h) * n_visible;
-    double *restrict lm00 = log_marg + ((0 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict lm01 = log_marg + ((0 * 2 + 1) * n_hidden + h) * n_visible;
-    double *restrict lm10 = log_marg + ((1 * 2 + 0) * n_hidden + h) * n_visible;
-    double *restrict lm11 = log_marg + ((1 * 2 + 1) * n_hidden + h) * n_visible;
-    for (unsigned int v = 0; v < n_visible; v++) {
-      double pc00 = pc00a[v];
-      double pc01 = pc01a[v];
-      double pc10 = pc10a[v];
-      double pc11 = pc11a[v];
-      double total0 = pc00 + pc01;
-      double total1 = pc10 + pc11;
-      double log_total0 = log(total0);
-      double log_total1 = log(total1);
-      lm00[v] = log(pc00) - log_total0;
-      lm01[v] = log(pc01) - log_total0;
-      lm10[v] = log(pc10) - log_total1;
-      lm11[v] = log(pc11) - log_total1;
+  for (unsigned int i = 0; i < n_hidden * n_visible; i ++) { // splitting at boundaries
+    double log_total0 = log(pc00[i] + pc01[i]);
+    lm00[i] = log(pc00[i]) - log_total0;
+    lm01[i] = log(pc01[i]) - log_total0;
+  }
+  for (unsigned int i = 0; i < n_hidden * n_visible; i ++) { // splitting at boundaries
+    double log_total1 = log(pc10[i] + pc11[i]);
+    lm10[i] = log(pc10[i]) - log_total1;
+    lm11[i] = log(pc11[i]) - log_total1;
+  }
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not affine
+    double *restrict lm00a = lm00 + h * n_visible;
+    double *restrict lm01a = lm01 + h * n_visible;
+    double *restrict lm10a = lm10 + h * n_visible;
+    double *restrict lm11a = lm11 + h * n_visible;
+    double lpy0 = log_p_y[h * 2 + 0];
+    double lpy1 = log_p_y[h * 2 + 1];
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      lm00a[v] -= lpy0;
+      lm01a[v] -= lpy1;
+      lm10a[v] -= lpy0;
+      lm11a[v] -= lpy1;
     }
   }
 }
@@ -629,114 +640,123 @@ static inline void tk_compressor_calculate_mis (
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
-  const unsigned int n_events = n_visible * 2;
-  for (unsigned int h = 0; h < n_hidden; h ++) {
+  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
+  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
+  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
+  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
+  double *restrict vc00 = pseudo_counts + 0 * n_hidden * n_visible;
+  double *restrict vc01 = pseudo_counts + 1 * n_hidden * n_visible;
+  double *restrict vc10 = pseudo_counts + 2 * n_hidden * n_visible;
+  double *restrict vc11 = pseudo_counts + 3 * n_hidden * n_visible;
+  double *restrict smis0 = smis + 0 * n_hidden * n_visible;
+  double *restrict smis1 = smis + 1 * n_hidden * n_visible;
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, non-affine base
+    double *restrict lm00a = lm00 + h * n_visible;
+    double *restrict lm01a = lm01 + h * n_visible;
+    double *restrict lm10a = lm10 + h * n_visible;
+    double *restrict lm11a = lm11 + h * n_visible;
+    double *restrict vc00a = vc00 + h * n_visible;
+    double *restrict vc01a = vc01 + h * n_visible;
+    double *restrict vc10a = vc10 + h * n_visible;
+    double *restrict vc11a = vc11 + h * n_visible;
+    double lpy0 = log_p_y[h * 2 + 0];
+    double lpy1 = log_p_y[h * 2 + 1];
     for (unsigned int v = 0; v < n_visible; v ++) {
-      for (unsigned int c = 0; c < 2; c ++) {
-        for (unsigned int d = 0; d < 2; d ++) {
-          double *restrict lm = log_marg + ((c * 2 + d) * n_hidden + h) * n_visible;
-          double *restrict vc = pseudo_counts + ((c * 2 + d) * n_hidden + h) * n_visible;
-          vc[v] = exp(lm[v] + log_p_y[h * 2 + d]);
-        }
-      }
+      vc00a[v] = exp(lm00a[v] + lpy0);
+      vc01a[v] = exp(lm01a[v] + lpy1);
+      vc10a[v] = exp(lm10a[v] + lpy0);
+      vc11a[v] = exp(lm11a[v] + lpy1);
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h ++) {
+  for (unsigned int i = 0; i < n_hidden * n_visible; i ++) // not vectorized, splitting dominance boundary
+    smis0[i] = vc00[i] * lm00[i] + vc01[i] * lm01[i];
+  for (unsigned int i = 0; i < n_hidden * n_visible; i ++)
+    smis1[i] = vc10[i] * lm10[i] + vc11[i] * lm11[i];
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, dominance boundary
+    double *restrict smis0a = smis0 + h * n_visible;
+    double *restrict smis1a = smis1 + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
-      for (unsigned int c = 0; c < 2; c ++) {
-        double sum = 0.0;
-        for (unsigned int d = 0; d < 2; d ++) {
-          double *restrict lm = log_marg + ((c * 2 + d) * n_hidden + h) * n_visible;
-          double *restrict vc = pseudo_counts + ((c * 2 + d) * n_hidden + h) * n_visible;
-          sum += vc[v] * lm[v];
-        }
-        smis[h * (n_visible * 2) + (v * 2 + c)] = sum;
-      }
+      double weighted_sum = smis0a[v] * (1 - p_x[v]) + smis1a[v] * (p_x[v]);
+      mis[h * n_visible + v] = weighted_sum;
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h ++) {
-    for (unsigned int j = 0; j < n_visible; j ++) {
-      unsigned int idx0 = h * n_events + j * 2 + 0;
-      unsigned int idx1 = h * n_events + j * 2 + 1;
-      double weighted_sum =
-        smis[idx0] * (1 - p_x[j]) +
-        smis[idx1] * (p_x[j]);
-      mis[h * n_visible + j] = weighted_sum;
-    }
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, non-affine base
+    double *restrict mish = mis + h * n_visible;
+    for (unsigned int v = 0; v < n_visible; v ++)
+      mish[v] /= entropy_x[v];
   }
-  for (unsigned int h = 0; h < n_hidden; h ++)
-    for (unsigned int j = 0; j < n_visible; j ++)
-      mis[h * n_visible + j] /= entropy_x[j];
 }
 
 static inline void tk_compressor_update_marginals (
   uint64_t cardinality,
-  uint64_t *bits,
-  double *log_p_y,
-  double *log_marg,
-  double *pseudo_counts,
-  double *p_y_given_x,
+  uint64_t *restrict bits,
+  double *restrict log_p_y,
+  double *restrict log_marg,
+  double *restrict pseudo_counts,
+  double *restrict p_y_given_x,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
   tk_compressor_calculate_p_y(log_p_y, p_y_given_x, n_samples, n_hidden);
-  tk_compressor_calculate_p_y_xi(cardinality, bits, log_marg, pseudo_counts, p_y_given_x, n_samples, n_visible, n_hidden);
-  for (unsigned int h = 0; h < n_hidden; h ++) {
-    for (unsigned int v = 0; v < n_visible; v ++) {
-      for (unsigned int c = 0; c < 2; c ++) {
-        for (unsigned int d = 0; d < 2; d ++) {
-          double *restrict lm = log_marg + ((c * 2 + d) * n_hidden + h) * n_visible;
-          lm[v] -= log_p_y[h * 2 + d];
-        }
-      }
-    }
-  }
+  tk_compressor_calculate_p_y_xi(cardinality, bits, log_marg, pseudo_counts, log_p_y, p_y_given_x, n_samples, n_visible, n_hidden);
 }
 
 static inline void tk_compressor_update_alpha (
   double tmin,
   double ttc,
   double lam,
-  double *alpha,
-  double *pseudo_counts,
-  double *tcs,
-  double *mis,
-  double *maxmis,
+  double *restrict alpha,
+  double *restrict pseudo_counts,
+  double *restrict tcs,
+  double *restrict mis,
+  double *restrict maxmis,
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
   for (unsigned int i = 0; i < n_hidden; i ++)
     tcs[i] = fabs(tcs[i]) * ttc + tmin;
-  for (unsigned int v = 0; v < n_visible; v ++) {
-    maxmis[v] = 0;
-    for (unsigned int h = 0; h < n_hidden; h ++)
-      if (mis[h * n_visible + v] > maxmis[v])
-        maxmis[v] = mis[h * n_visible + v];
+  for (unsigned int v = 0; v < n_visible; v ++) { // not vectorized, unsupported outer form
+    double max_val = 0.0;
+    for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, costings not worth while
+      double candidate = mis[h * n_visible + v];
+      if (candidate > max_val)
+        max_val = candidate;
+    }
+    maxmis[v] = max_val;
   }
-  for (unsigned int i = 0; i < n_hidden; i ++)
-    for (unsigned int j = 0; j < n_visible; j ++)
-      pseudo_counts[i * n_visible + j] = exp(tcs[i] * (mis[i * n_visible + j] - maxmis[j]));
-  for (unsigned int i = 0; i < n_hidden; i ++)
-    for (unsigned int j = 0; j < n_visible; j ++)
-      alpha[i * n_visible + j] = (1.0 - lam) * alpha[i * n_visible + j] + lam * pseudo_counts[i * n_visible + j];
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, non-affine base or splitting at boundary
+    double t = tcs[h];
+    double *restrict mish = mis + h * n_visible;
+    double *restrict ps = pseudo_counts + h * n_visible;
+    for (unsigned int v = 0; v < n_visible; v ++)
+      ps[v] = exp(t * (mish[v] - maxmis[v]));
+  }
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, non-affine
+    double *restrict alphah = alpha + h * n_visible;
+    double *restrict ps = pseudo_counts + h * n_visible;
+    for (unsigned int v = 0; v < n_visible; v ++)
+      alphah[v] = (1.0 - lam) * alphah[v] + lam * ps[v];
+  }
 }
 
 static inline void tk_compressor_update_tc (
   unsigned int i,
-  double *log_z, // mis
-  double *tcs,
-  double *tc_history,
+  double *restrict log_z, // mis
+  double *restrict tcs,
+  double *restrict tc_history,
   unsigned int n_samples,
   unsigned int n_hidden
 ) {
   double sum0 = 0.0;
-  for (unsigned int h = 0; h < n_hidden; h ++) {
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, unsupported outer form
+    const double *restrict lz = log_z + h * n_samples;
     double sum1 = 0.0;
     for (unsigned int s = 0; s < n_samples; s ++)
-      sum1 += log_z[h * n_samples + s];
-    tcs[h] = sum1 / (double) n_samples;
-    sum0 += tcs[h];
+      sum1 += lz[s];
+    double tc = sum1 / (double) n_samples;
+    tcs[h] = tc;
+    sum0 += tc;
   }
   tc_history[i] = sum0;
 }
@@ -744,49 +764,75 @@ static inline void tk_compressor_update_tc (
 static inline void tk_compressor_calculate_latent(
   uint64_t cardinality,
   uint64_t *bits,
-  double *alpha,
-  double *p_y_given_x,
-  double *log_z, // mis
-  double *log_p_y,
-  double *log_p_y_given_x_unnorm,
-  double *log_marg,
+  double *restrict alpha,
+  double *restrict p_y_given_x,
+  double *restrict log_z, // mis
+  double *restrict log_p_y,
+  double *restrict log_p_y_given_x_unnorm,
+  double *restrict log_marg,
+  double *restrict sums,
+  double *restrict sumsa,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
-  unsigned int p = 0;
-  for (unsigned int i = 0; i < n_samples; i ++) {
-    uint64_t sample_offset = (uint64_t)i * n_visible;
-    uint64_t sample_end = sample_offset + n_visible;
-    while (p < cardinality && bits[p] < sample_offset)
-      p++;
-    for (unsigned int h = 0; h < n_hidden; h ++) {
-      for (unsigned int d = 0; d < 2; d++) {
-        double s = 0.0;
-        double *restrict lm = log_marg + ((0 * 2 + d) * n_hidden + h) * n_visible;
-        for (unsigned int v = 0; v < n_visible; v ++) {
-          double val_absent = lm[v];
-          s += alpha[h * n_visible + v] * val_absent;
-        }
-        unsigned int r = p;
-        double s_adjusted = s;
-        while (r < cardinality && bits[r] < sample_end) {
-          unsigned int v = bits[r] - sample_offset;
-          double *restrict lm0 = log_marg + ((0 * 2 + d) * n_hidden + h) * n_visible;
-          double *restrict lm1 = log_marg + ((1 * 2 + d) * n_hidden + h) * n_visible;
-          double val_absent  = lm0[v];
-          double val_present = lm1[v];
-          double w = alpha[h * n_visible + v];
-          s_adjusted = s_adjusted - w * val_absent + w * val_present;
-          r++;
-        }
-        log_p_y_given_x_unnorm[d * n_hidden * n_samples + h * n_samples + i] = s_adjusted + log_p_y[h * 2 + d];
-      }
+  double *restrict sums0 = sums + 0 * n_hidden * n_samples;
+  double *restrict sums1 = sums + 1 * n_hidden * n_samples;
+  double *restrict sumsa0 = sumsa + 0 * n_hidden;
+  double *restrict sumsa1 = sumsa + 1 * n_hidden;
+  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
+  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
+  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
+  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, unsupported outer form
+    double s0 = 0.0, s1 = 0.0;
+    double *restrict lm00a = lm00 + h * n_visible;
+    double *restrict lm01a = lm01 + h * n_visible;
+    double *restrict aph = alpha + h * n_visible;
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      s0 += aph[v] * lm00a[v];
+      s1 += aph[v] * lm01a[v];
     }
-    unsigned int r2 = p;
-    while (r2 < cardinality && bits[r2] < sample_end)
-      r2++;
-    p = r2;
+    sumsa0[h] = s0;
+    sumsa1[h] = s1;
+  }
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, not affine
+    double s0 = sumsa0[h];
+    double s1 = sumsa1[h];
+    double *restrict sums0a = sums0 + h * n_samples;
+    double *restrict sums1a = sums1 + h * n_samples;
+    for (unsigned int i = 0; i < n_samples; i ++) {
+      sums0a[i] = s0;
+      sums1a[i] = s1;
+    }
+  }
+  for (unsigned int b = 0; b < cardinality; b ++) {
+    unsigned int c = bits[b];
+    unsigned int i = c / n_visible;
+    unsigned int v = c % n_visible;
+    for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, gather/scatter
+      double *restrict sums0h = sums0 + h * n_samples;
+      double *restrict sums1h = sums1 + h * n_samples;
+      double *restrict lm00a = lm00 + h * n_visible;
+      double *restrict lm01a = lm01 + h * n_visible;
+      double *restrict lm10a = lm10 + h * n_visible;
+      double *restrict lm11a = lm11 + h * n_visible;
+      double *restrict aph = alpha + h * n_visible;
+      sums0h[i] = sums0h[i] - aph[v] * lm00a[v] + aph[v] * lm10a[v]; // gather/scatter
+      sums1h[i] = sums1h[i] - aph[v] * lm01a[v] + aph[v] * lm11a[v]; // gather/scatter
+    }
+  }
+  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, not affine
+    double lpy_d0 = log_p_y[h * 2 + 0];
+    double lpy_d1 = log_p_y[h * 2 + 1];
+    double *restrict sums0h = sums0 + h * n_samples;
+    double *restrict sums1h = sums1 + h * n_samples;
+    double *restrict lpyx0 = log_p_y_given_x_unnorm + 0 * n_hidden * n_samples + h * n_samples;
+    double *restrict lpyx1 = log_p_y_given_x_unnorm + 1 * n_hidden * n_samples + h * n_samples;
+    for (unsigned int i = 0; i < n_samples; i ++) {
+      lpyx0[i] = sums0h[i] + lpy_d0;
+      lpyx1[i] = sums1h[i] + lpy_d1;
+    }
   }
   tk_compressor_normalize_latent(log_z, p_y_given_x, log_p_y_given_x_unnorm, n_hidden, n_samples);
 }
@@ -800,6 +846,11 @@ static inline int tk_bitmap_compress (lua_State *L)
   roaring64_bitmap_to_uint64_array(bm, bits);
   unsigned int n_samples = tk_lua_optunsigned(L, 2, 1);
   compressor->mis = realloc(compressor->mis, compressor->n_hidden * n_samples * sizeof(double));
+  unsigned int len_sums =
+    (2 * compressor->n_hidden * (n_samples < compressor->n_visible
+      ? compressor->n_visible
+      : n_samples));
+  compressor->sums = realloc(compressor->sums, len_sums * sizeof(double));
   tk_compressor_calculate_latent(
     cardinality, bits,
     compressor->alpha,
@@ -808,6 +859,8 @@ static inline int tk_bitmap_compress (lua_State *L)
     compressor->log_p_y,
     compressor->log_p_y_given_x_unnorm,
     compressor->log_marg,
+    compressor->sums,
+    compressor->sumsa,
     n_samples,
     compressor->n_visible,
     compressor->n_hidden);
@@ -924,6 +977,8 @@ static inline void tk_compressor_init (
   compressor->mis = malloc(len_mis * sizeof(double));
   compressor->smis = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
   compressor->maxmis = malloc(compressor->n_visible * sizeof(double));
+  compressor->sums = malloc(2 * n_samples * n_hidden * sizeof(double));
+  compressor->sumsa = malloc(2 * n_hidden * sizeof(double));
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
   uint64_t *bits = malloc(cardinality * sizeof(uint64_t));
   roaring64_bitmap_to_uint64_array(bm, bits);
@@ -990,6 +1045,8 @@ static inline void tk_compressor_init (
       compressor->log_p_y,
       compressor->log_p_y_given_x_unnorm,
       compressor->log_marg,
+      compressor->sums,
+      compressor->sumsa,
       n_samples,
       compressor->n_visible,
       compressor->n_hidden);

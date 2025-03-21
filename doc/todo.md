@@ -13,6 +13,8 @@
     - sanitizer/valgrind
     - can we replace malloc with lua_newuserdata across the board?
     - any opportunities to eliminate mis, smis, maxmis allocations?
+    - are p_y_given_x/etc actually storing (x) and (1 - x) separately when this
+      is not strictly necessary?
 
 - bitmap.create from raw string
 - matrix/raw_matrix accept bitmaps or strings
