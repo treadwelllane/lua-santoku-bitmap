@@ -534,15 +534,16 @@ static inline void tk_compressor_calculate_p_y (
   unsigned int n_samples,
   unsigned int n_hidden
 ) {
+  // Outer loop not vectorized
   for (unsigned int h = 0; h < n_hidden; h ++) {
-    double pseudo_counts_0 = 0.001;
-    double pseudo_counts_1 = 0.001;
     double *restrict offset0 = p_y_given_x + 0 * n_hidden * n_samples + h * n_samples;
     double *restrict offset1 = p_y_given_x + 1 * n_hidden * n_samples + h * n_samples;
-    for (unsigned int s = 0; s < n_samples; s ++)
+    double pseudo_counts_0 = 0.001;
+    double pseudo_counts_1 = 0.001;
+    for (unsigned int s = 0; s < n_samples; s ++) {
       pseudo_counts_0 += offset0[s];
-    for (unsigned int s = 0; s < n_samples; s ++)
       pseudo_counts_1 += offset1[s];
+    }
     double sum_pseudo_counts = pseudo_counts_0 + pseudo_counts_1;
     log_p_y[h * 2 + 0] = log(pseudo_counts_0) - log(sum_pseudo_counts);
     log_p_y[h * 2 + 1] = log(pseudo_counts_1) - log(sum_pseudo_counts);
@@ -551,56 +552,104 @@ static inline void tk_compressor_calculate_p_y (
 
 static void tk_compressor_calculate_p_y_xi (
   uint64_t cardinality,
-  uint64_t *bits,
-  double *log_marg,
-  double *pseudo_counts,
-  double *p_y_given_x,
+  uint64_t *restrict bits,
+  double *restrict log_marg,
+  double *restrict pseudo_counts,
+  double *restrict p_y_given_x,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
-  memset(pseudo_counts, 0, n_hidden * n_visible * 2 * 2 * sizeof(double));
-  for (unsigned int s = 0; s < n_samples; s++) {
-    for (unsigned int h = 0; h < n_hidden; h++) {
-      double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
-      double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
-      for (unsigned int v = 0; v < n_visible; v++) {
-        pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 0] += py0;
-        pseudo_counts[(h * (n_visible * 2) + (v * 2 + 0)) * 2 + 1] += py1;
-      }
-    }
-  }
-  for (uint64_t c = 0; c < cardinality; c++) {
-    uint64_t b = bits[c];
-    uint64_t s = b / n_visible;
-    uint64_t v = b % n_visible;
-    for (unsigned int h = 0; h < n_hidden; h++) {
-      double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
-      double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
-      pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] += py0;
-      pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1] += py1;
-      pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] -= py0;
-      pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1] -= py1;
-    }
-  }
-  for (size_t i = 0; i < n_hidden * n_visible * 2 * 2; i++)
-    pseudo_counts[i] += 0.001;
-  for (unsigned int h = 0; h < n_hidden; h ++) {
+  for (unsigned int i = 0; i < 2 * 2 * n_hidden * n_visible; i ++)
+    pseudo_counts[i] = 0;
+  // Outer loop not vectorized
+  for (unsigned int h = 0; h < n_hidden; h++) {
+    double sum_py0 = 0.0;
+    double sum_py1 = 0.0;
+    double *restrict pc0 = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
+    double *restrict pc1 = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
+    double *restrict hpy0s = p_y_given_x + 0 * n_hidden * n_samples + h * n_samples;
+    double *restrict hpy1s = p_y_given_x + 1 * n_hidden * n_samples + h * n_samples;
+    for (unsigned int s = 0; s < n_samples; s ++)
+      sum_py0 += hpy0s[s];
+    for (unsigned int s = 0; s < n_samples; s ++)
+      sum_py1 += hpy1s[s];
     for (unsigned int v = 0; v < n_visible; v ++) {
-      double total0 =
-        pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] +
-        pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1];
-      double total1 =
-        pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] +
-        pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1];
+      pc0[v] += sum_py0;
+      pc1[v] += sum_py1;
+    }
+  }
+  // Not vectorized
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    for (unsigned int i = 0; i < 4 * n_visible; i ++)
+      log_marg[i] = 0;
+    double *restrict pc00a = log_marg + 0 * n_visible;
+    double *restrict pc01a = log_marg + 1 * n_visible;
+    double *restrict pc10a = log_marg + 2 * n_visible;
+    double *restrict pc11a = log_marg + 3 * n_visible;
+    // Not vectorized due to scatter
+    for (uint64_t c = 0; c < cardinality; c ++) {
+      uint64_t b = bits[c];
+      uint64_t s = b / n_visible;
+      uint64_t v = b % n_visible;
+      double py0 = p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
+      double py1 = p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
+      pc10a[v] += py0;
+      pc11a[v] += py1;
+      pc00a[v] -= py0;
+      pc01a[v] -= py1;
+    }
+    double *restrict pc00 = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
+    double *restrict pc01 = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
+    double *restrict pc10 = pseudo_counts + ((1 * 2 + 0) * n_hidden + h) * n_visible;
+    double *restrict pc11 = pseudo_counts + ((1 * 2 + 1) * n_hidden + h) * n_visible;
+    for (unsigned int v = 0; v < n_visible; v++) {
+      pc10[v] += pc10a[v];
+      pc11[v] += pc11a[v];
+      pc00[v] += pc00a[v];
+      pc01[v] += pc01a[v];
+    }
+  }
+  for (unsigned int i = 0; i < 2 * 2 * n_hidden * n_visible; i ++)
+    pseudo_counts[i] += 0.001;
+  for (unsigned int h = 0; h < n_hidden; h++) {
+    // Precompute the row pointers so that each pseudo_counts channel is accessed contiguously.
+    double *restrict pc00a = pseudo_counts + ((0 * 2 + 0) * n_hidden + h) * n_visible;
+    double *restrict pc01a = pseudo_counts + ((0 * 2 + 1) * n_hidden + h) * n_visible;
+    double *restrict pc10a = pseudo_counts + ((1 * 2 + 0) * n_hidden + h) * n_visible;
+    double *restrict pc11a = pseudo_counts + ((1 * 2 + 1) * n_hidden + h) * n_visible;
+    for (unsigned int v = 0; v < n_visible; v++) {
+      double pc00 = pc00a[v];
+      double pc01 = pc01a[v];
+      double pc10 = pc10a[v];
+      double pc11 = pc11a[v];
+      double total0 = pc00 + pc01;
+      double total1 = pc10 + pc11;
       double log_total0 = log(total0);
       double log_total1 = log(total1);
-      log_marg[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 0]) - log_total0;
-      log_marg[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 0)) * 2 + 1]) - log_total0;
-      log_marg[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 0]) - log_total1;
-      log_marg[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1] = log(pseudo_counts[(h * n_visible * 2 + (v * 2 + 1)) * 2 + 1]) - log_total1;
+      log_marg[4 * (h * n_visible + v) + 0] = log(pc00) - log_total0;
+      log_marg[4 * (h * n_visible + v) + 1] = log(pc01) - log_total0;
+      log_marg[4 * (h * n_visible + v) + 2] = log(pc10) - log_total1;
+      log_marg[4 * (h * n_visible + v) + 3] = log(pc11) - log_total1;
     }
   }
+  // for (unsigned int i = 0; i < n_hidden * n_visible; i++) {
+  //   unsigned int h = i / n_visible;
+  //   unsigned int v = i % n_visible;
+  //   double pc00 = pseudo_counts[((0 * 2 + 0) * n_hidden + h) * n_visible + v];
+  //   double pc01 = pseudo_counts[((0 * 2 + 1) * n_hidden + h) * n_visible + v];
+  //   double pc10 = pseudo_counts[((1 * 2 + 0) * n_hidden + h) * n_visible + v];
+  //   double pc11 = pseudo_counts[((1 * 2 + 1) * n_hidden + h) * n_visible + v];
+  //   double total0 = pc00 + pc01;
+  //   double total1 = pc10 + pc11;
+  //   double log_total0 = log(total0);
+  //   double log_total1 = log(total1);
+  //   unsigned int base = 4 * (h * n_visible + v);
+  //   log_marg[base + 0] = log(pc00) - log_total0;
+  //   log_marg[base + 1] = log(pc01) - log_total0;
+  //   log_marg[base + 2] = log(pc10) - log_total1;
+  //   log_marg[base + 3] = log(pc11) - log_total1;
+  // }
 }
 
 static inline void tk_compressor_calculate_mis (
@@ -849,9 +898,8 @@ static inline void tk_compressor_init_alpha (
   unsigned int n_hidden,
   unsigned int n_visible
 ) {
-  for (unsigned int i = 0; i < n_hidden; ++i)
-    for (unsigned int j = 0; j < n_visible; ++j)
-      alpha[i * n_visible + j] = 0.5 + 0.5 * fast_drand();
+  for (unsigned int i = 0; i < n_hidden * n_visible; ++i)
+    alpha[i] = 0.5 + 0.5 * fast_drand();
 }
 
 static inline void tk_compressor_init_tcs (
@@ -901,7 +949,7 @@ static inline void tk_compressor_init (
   compressor->vec = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
   compressor->log_marg_xi = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
-  compressor->pseudo_counts = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
+  compressor->pseudo_counts = malloc(2 * 2 * compressor->n_hidden * compressor->n_visible * sizeof(double));
   compressor->mis = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
   compressor->smis = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
   compressor->maxmis = malloc(compressor->n_visible * sizeof(double));
