@@ -507,14 +507,15 @@ static void tk_compressor_normalize_latent (
 
 static inline void tk_compressor_data_stats (
   uint64_t cardinality,
-  uint64_t *bits,
-  double *p_x,
-  double *entropy_x,
+  uint64_t *restrict bits,
+  double *restrict p_x,
+  double *restrict entropy_x,
   unsigned int n_samples,
   unsigned int n_visible
 ) {
   for (unsigned int v = 0; v < n_visible; v ++)
     p_x[v] = 0;
+  // TODO: not vectorized
   for (uint64_t c = 0; c < cardinality; c ++)
     p_x[bits[c] % n_visible] ++;
   for (unsigned int v = 0; v < n_visible; v ++)
@@ -528,18 +529,20 @@ static inline void tk_compressor_data_stats (
 }
 
 static inline void tk_compressor_calculate_p_y (
-  double *log_p_y,
-  double *p_y_given_x,
+  double *restrict log_p_y,
+  double *restrict p_y_given_x,
   unsigned int n_samples,
   unsigned int n_hidden
 ) {
-  for (unsigned int h = 0; h < n_hidden; ++h) {
+  for (unsigned int h = 0; h < n_hidden; h ++) {
     double pseudo_counts_0 = 0.001;
     double pseudo_counts_1 = 0.001;
-    for (unsigned int s = 0; s < n_samples; ++s) {
-      pseudo_counts_0 += p_y_given_x[0 * n_hidden * n_samples + h * n_samples + s];
-      pseudo_counts_1 += p_y_given_x[1 * n_hidden * n_samples + h * n_samples + s];
-    }
+    double *restrict offset0 = p_y_given_x + 0 * n_hidden * n_samples + h * n_samples;
+    double *restrict offset1 = p_y_given_x + 1 * n_hidden * n_samples + h * n_samples;
+    for (unsigned int s = 0; s < n_samples; s ++)
+      pseudo_counts_0 += offset0[s];
+    for (unsigned int s = 0; s < n_samples; s ++)
+      pseudo_counts_1 += offset1[s];
     double sum_pseudo_counts = pseudo_counts_0 + pseudo_counts_1;
     log_p_y[h * 2 + 0] = log(pseudo_counts_0) - log(sum_pseudo_counts);
     log_p_y[h * 2 + 1] = log(pseudo_counts_1) - log(sum_pseudo_counts);
@@ -601,27 +604,27 @@ static void tk_compressor_calculate_p_y_xi (
 }
 
 static inline void tk_compressor_calculate_mis (
-  double *mis,
-  double *smis,
-  double *vec,
-  double *log_p_y,
-  double *log_marg,
-  double *p_x,
-  double *entropy_x,
+  double *restrict mis,
+  double *restrict smis,
+  double *restrict vec,
+  double *restrict log_p_y,
+  double *restrict log_marg,
+  double *restrict p_x,
+  double *restrict entropy_x,
   unsigned int n_visible,
   unsigned int n_hidden
 ) {
   const unsigned int n_events = n_visible * 2;
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    for (unsigned int e = 0; e < n_events; e++) {
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    for (unsigned int e = 0; e < n_events; e ++) {
       for (unsigned int d = 0; d < 2; d++) {
         unsigned int idx = (h * n_events + e) * 2 + d;
         vec[idx] = exp(log_marg[idx] + log_p_y[h * 2 + d]);
       }
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    for (unsigned int e = 0; e < n_events; e++) {
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    for (unsigned int e = 0; e < n_events; e ++) {
       double sum = 0.0;
       for (unsigned int d = 0; d < 2; d++) {
         unsigned int idx = (h * n_events + e) * 2 + d;
@@ -630,8 +633,8 @@ static inline void tk_compressor_calculate_mis (
       smis[h * n_events + e] = sum;
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    for (unsigned int j = 0; j < n_visible; j++) {
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    for (unsigned int j = 0; j < n_visible; j ++) {
       unsigned int idx0 = h * n_events + j * 2 + 0;
       unsigned int idx1 = h * n_events + j * 2 + 1;
       double weighted_sum =
@@ -640,11 +643,9 @@ static inline void tk_compressor_calculate_mis (
       mis[h * n_visible + j] = weighted_sum;
     }
   }
-  for (unsigned int h = 0; h < n_hidden; h++) {
-    for (unsigned int j = 0; j < n_visible; j++) {
+  for (unsigned int h = 0; h < n_hidden; h ++)
+    for (unsigned int j = 0; j < n_visible; j ++)
       mis[h * n_visible + j] /= entropy_x[j];
-    }
-  }
 }
 
 static inline void tk_compressor_update_marginals (
@@ -849,9 +850,8 @@ static inline void tk_compressor_init_alpha (
   unsigned int n_visible
 ) {
   for (unsigned int i = 0; i < n_hidden; ++i)
-    for (unsigned int j = 0; j < n_visible; ++j) {
+    for (unsigned int j = 0; j < n_visible; ++j)
       alpha[i * n_visible + j] = 0.5 + 0.5 * fast_drand();
-    }
 }
 
 static inline void tk_compressor_init_tcs (
@@ -893,11 +893,18 @@ static inline void tk_compressor_init (
   compressor->alpha = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
   compressor->alphaopt = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
   compressor->p_y_given_x = malloc(2 * compressor->n_hidden * n_samples * sizeof(double));
-  compressor->log_p_y_given_x_unnorm = malloc(2 * compressor->n_hidden * n_samples * sizeof(double));
   compressor->log_z = malloc(compressor->n_hidden * n_samples * sizeof(double));
   compressor->log_p_y = malloc(2 * compressor->n_hidden * sizeof(double));
+  compressor->log_p_y_given_x_unnorm = malloc(2 * compressor->n_hidden * n_samples * sizeof(double));
   compressor->p_x = malloc(compressor->n_visible * sizeof(double));
   compressor->entropy_x = malloc(compressor->n_visible * sizeof(double));
+  compressor->vec = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
+  compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
+  compressor->log_marg_xi = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
+  compressor->pseudo_counts = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
+  compressor->mis = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
+  compressor->smis = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
+  compressor->maxmis = malloc(compressor->n_visible * sizeof(double));
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
   uint64_t *bits = malloc(cardinality * sizeof(uint64_t));
   roaring64_bitmap_to_uint64_array(bm, bits);
@@ -924,13 +931,6 @@ static inline void tk_compressor_init (
     compressor->log_p_y_given_x_unnorm,
     compressor->n_hidden,
     n_samples);
-  compressor->vec = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
-  compressor->log_marg = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
-  compressor->log_marg_xi = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
-  compressor->pseudo_counts = malloc(compressor->n_hidden * compressor->n_visible * 2 * 2 * sizeof(double));
-  compressor->mis = malloc(compressor->n_hidden * compressor->n_visible * sizeof(double));
-  compressor->smis = malloc(compressor->n_hidden * compressor->n_visible * 2 * sizeof(double));
-  compressor->maxmis = malloc(compressor->n_visible * sizeof(double));
   unsigned int i = 0;
   while (i < max_iter) {
     tk_compressor_update_marginals(
