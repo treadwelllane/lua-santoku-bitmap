@@ -1,13 +1,13 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.23-1",
+  version = "0.0.24-1",
   variable_prefix = "TK_BITMAP",
   public = true,
 
   -- -Wsign-conversion -Wsign-compare would be nice, but need to fix all the warning spots
   cflags = { "-march=native", "-O3", "-ffast-math", "-Wall", "-Wextra", "-Wno-sign-compare", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter" },
-  ldflags = { "-march=native", "-O3", "-lm", },
+  ldflags = { "-march=native", "-O3", "-lm", "-lpthread", },
 
   dependencies = {
     "lua == 5.1",

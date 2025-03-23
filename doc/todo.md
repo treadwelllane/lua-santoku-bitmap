@@ -1,6 +1,8 @@
 # Now
 
 - compressor
+    - abstract the various pointer shortcuts (pc00, pc01, etc) to macros
+    - enable all pointer/size/etc warnings
     - catch malloc/realloc errors
     - return object with compress fn, output stats, rankings, etc
     - allow persist/load
@@ -19,6 +21,6 @@
 
 # Eventually
 
+- Consider migrating compressor to tsetlin library
 - Consider converting this to be entirely "matrix" based
-
 - Allow specifying int type to use for raw bitmaps
