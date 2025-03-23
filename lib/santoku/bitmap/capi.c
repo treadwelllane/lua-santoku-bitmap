@@ -790,8 +790,6 @@ static inline void tk_compressor_alpha_thread (
 ) {
   double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  double *restrict sums0 = sums + 0 * n_hidden * n_samples;
-  double *restrict sums1 = sums + 1 * n_hidden * n_samples;
   double *restrict sumsa0 = sumsa + 0 * n_hidden;
   double *restrict sumsa1 = sumsa + 1 * n_hidden;
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine base or splitting at boundary
@@ -819,127 +817,6 @@ static inline void tk_compressor_alpha_thread (
     sumsa0[h] = s0;
     sumsa1[h] = s1;
   }
-  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, not affine
-    double s0 = sumsa0[h];
-    double s1 = sumsa1[h];
-    double *restrict sums0a = sums0 + h * n_samples;
-    double *restrict sums1a = sums1 + h * n_samples;
-    for (unsigned int i = 0; i < n_samples; i ++) { // why are we doing this?
-      sums0a[i] = s0;
-      sums1a[i] = s1;
-    }
-  }
-}
-
-static inline void tk_compressor_logsumexp (
-  double *restrict log_pyx_unnorm,
-  double *restrict log_z, // mis
-  unsigned int n_hidden,
-  unsigned int n_samples
-) {
-  double *restrict offset0 = log_pyx_unnorm + 0 * n_hidden * n_samples;
-  double *restrict offset1 = log_pyx_unnorm + 1 * n_hidden * n_samples;
-  for (unsigned int i = 0; i < n_hidden * n_samples; i ++) {
-    double a = offset0[i];
-    double b = offset1[i];
-    double max_ab  = (a > b) ? a : b;
-    double sum_exp = exp(a - max_ab) + exp(b - max_ab);
-    log_z[i] = max_ab + log(sum_exp);
-  }
-}
-
-static void tk_compressor_normalize_latent (
-  double *restrict log_z, // mis
-  double *restrict pyx,
-  double *restrict log_pyx_unnorm,
-  unsigned int n_hidden,
-  unsigned int n_samples
-) {
-  tk_compressor_logsumexp(log_pyx_unnorm, log_z, n_hidden, n_samples);
-  double *restrict pyx_offset0 = pyx + 0 * n_hidden * n_samples;
-  double *restrict pyx_offset1 = pyx + 1 * n_hidden * n_samples;
-  double *restrict pyxu_offset0 = log_pyx_unnorm + 0 * n_hidden * n_samples;
-  double *restrict pyxu_offset1 = log_pyx_unnorm + 1 * n_hidden * n_samples;
-  for (unsigned int i = 0; i < n_hidden * n_samples; i ++)
-    pyx_offset0[i] = exp(pyxu_offset0[i] - log_z[i]);
-  for (unsigned int i = 0; i < n_hidden * n_samples; i ++)
-    pyx_offset1[i] = exp(pyxu_offset1[i] - log_z[i]);
-}
-
-static inline void tk_compressor_calculate_latent(
-  uint64_t cardinality,
-  uint64_t *restrict samples,
-  unsigned int *restrict visibles,
-  double *restrict alpha,
-  double *restrict pyx,
-  double *restrict log_z, // mis
-  double *restrict log_py,
-  double *restrict log_pyx_unnorm,
-  double *restrict log_marg,
-  double *restrict sums,
-  double *restrict sumsa,
-  unsigned int n_samples,
-  unsigned int n_visible,
-  unsigned int n_hidden
-) {
-  double *restrict sums0 = sums + 0 * n_hidden * n_samples;
-  double *restrict sums1 = sums + 1 * n_hidden * n_samples;
-  double *restrict sumsa0 = sumsa + 0 * n_hidden;
-  double *restrict sumsa1 = sumsa + 1 * n_hidden;
-  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
-  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
-  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
-  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, unsupported outer form
-    double s0 = 0.0, s1 = 0.0;
-    double *restrict lm00a = lm00 + h * n_visible;
-    double *restrict lm01a = lm01 + h * n_visible;
-    double *restrict aph = alpha + h * n_visible;
-    for (unsigned int v = 0; v < n_visible; v ++) {
-      s0 += aph[v] * lm00a[v];
-      s1 += aph[v] * lm01a[v];
-    }
-    sumsa0[h] = s0;
-    sumsa1[h] = s1;
-  }
-  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, not affine
-    double s0 = sumsa0[h];
-    double s1 = sumsa1[h];
-    double *restrict sums0a = sums0 + h * n_samples;
-    double *restrict sums1a = sums1 + h * n_samples;
-    for (unsigned int i = 0; i < n_samples; i ++) {
-      sums0a[i] = s0;
-      sums1a[i] = s1;
-    }
-  }
-  for (unsigned int c = 0; c < cardinality; c ++) {
-    uint64_t s = samples[c];
-    unsigned int v = visibles[c];
-    for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, gather/scatter
-      double *restrict sums0h = sums0 + h * n_samples;
-      double *restrict sums1h = sums1 + h * n_samples;
-      double *restrict lm00a = lm00 + h * n_visible;
-      double *restrict lm01a = lm01 + h * n_visible;
-      double *restrict lm10a = lm10 + h * n_visible;
-      double *restrict lm11a = lm11 + h * n_visible;
-      double *restrict aph = alpha + h * n_visible;
-      sums0h[s] = sums0h[s] - aph[v] * lm00a[v] + aph[v] * lm10a[v]; // gather/scatter
-      sums1h[s] = sums1h[s] - aph[v] * lm01a[v] + aph[v] * lm11a[v]; // gather/scatter
-    }
-  }
-  for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, not affine
-    double lpy_d0 = log_py[h * 2 + 0];
-    double lpy_d1 = log_py[h * 2 + 1];
-    double *restrict sums0h = sums0 + h * n_samples;
-    double *restrict sums1h = sums1 + h * n_samples;
-    double *restrict lpyx0 = log_pyx_unnorm + 0 * n_hidden * n_samples + h * n_samples;
-    double *restrict lpyx1 = log_pyx_unnorm + 1 * n_hidden * n_samples + h * n_samples;
-    for (unsigned int i = 0; i < n_samples; i ++) {
-      lpyx0[i] = sums0h[i] + lpy_d0;
-      lpyx1[i] = sums1h[i] + lpy_d1;
-    }
-  }
-  tk_compressor_normalize_latent(log_z, pyx, log_pyx_unnorm, n_hidden, n_samples);
 }
 
 static inline void tk_compressor_latent_sums_thread (
@@ -951,18 +828,33 @@ static inline void tk_compressor_latent_sums_thread (
   double *restrict log_z, // mis
   double *restrict log_marg,
   double *restrict sums,
+  double *restrict sumsa,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden,
   unsigned int bfirst,
-  unsigned int blast
+  unsigned int blast,
+  unsigned int hfirst,
+  unsigned int hlast
 ) {
   double *restrict sums0 = sums + 0 * n_hidden * n_samples;
   double *restrict sums1 = sums + 1 * n_hidden * n_samples;
+  double *restrict sumsa0 = sumsa + 0 * n_hidden;
+  double *restrict sumsa1 = sumsa + 1 * n_hidden;
   double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
   double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
   double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
+  for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, not affine
+    double s0 = sumsa0[h];
+    double s1 = sumsa1[h];
+    double *restrict sums0a = sums0 + h * n_samples;
+    double *restrict sums1a = sums1 + h * n_samples;
+    for (unsigned int i = 0; i < n_samples; i ++) { // why are we doing this?
+      sums0a[i] = s0;
+      sums1a[i] = s1;
+    }
+  }
   for (unsigned int b = bfirst; b <= blast; b ++) {
     uint64_t s = samples[b];
     unsigned int v = visibles[b];
@@ -1113,7 +1005,22 @@ static inline int tk_bitmap_compress (lua_State *L)
       ? compressor->n_visible
       : n_samples));
   compressor->sums = realloc(compressor->sums, len_sums * sizeof(double));
-  // TODO: Use the threadpool, Luke
+  // This works, but it's the old code'
+  // tk_compressor_calculate_latent(
+  //   cardinality, samples, visibles,
+  //   compressor->alpha,
+  //   compressor->pyx,
+  //   compressor->mis,
+  //   compressor->log_py,
+  //   compressor->log_pyx_unnorm,
+  //   compressor->log_marg,
+  //   compressor->sums,
+  //   compressor->sumsa,
+  //   n_samples,
+  //   compressor->n_visible,
+  //   compressor->n_hidden);
+
+  // This should work, but doesn't
   tk_compressor_latent_sums_thread(
     cardinality,
     samples,
@@ -1123,10 +1030,12 @@ static inline int tk_bitmap_compress (lua_State *L)
     compressor->mis,
     compressor->log_marg,
     compressor->sums,
+    compressor->sumsa,
     n_samples,
     compressor->n_visible,
     compressor->n_hidden,
-    0, cardinality - 1);
+    0, cardinality - 1,
+    0, compressor->n_hidden - 1);
   tk_compressor_latent_py_thread(
     compressor->log_py,
     compressor->log_pyx_unnorm,
@@ -1283,11 +1192,14 @@ static void *tk_compressor_worker (void *datap)
           data->compressor->mis,
           data->compressor->log_marg,
           data->compressor->sums,
+          data->compressor->sumsa,
           data->n_samples,
           data->compressor->n_visible,
           data->compressor->n_hidden,
           data->bfirst,
-          data->blast);
+          data->blast,
+          data->hfirst,
+          data->hlast);
         break;
       case TK_CMP_LATENT_PY:
         tk_compressor_latent_py_thread(
