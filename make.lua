@@ -1,11 +1,11 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.26-1",
+  version = "0.0.27-1",
   variable_prefix = "TK_BITMAP",
   public = true,
 
-  cflags = { "-march=native", "-O3", "-ffast-math", "-Wall", "-Wextra", "-Wsign-conversion", "-Wsign-compare", "-Wstrict-overflow", "-Wpointer-sign", },
+  cflags = { "-march=native", "-O3", "-Wall", "-Wextra", "-Wsign-conversion", "-Wsign-compare", "-Wstrict-overflow", "-Wpointer-sign", },
   ldflags = { "-march=native", "-O3", "-lm", "-lpthread", },
 
   dependencies = {

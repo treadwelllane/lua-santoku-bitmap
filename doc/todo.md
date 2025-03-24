@@ -1,5 +1,7 @@
 # Now
 
+- clean up handling of signed/unsigned/etc integers (there are likely bugs when > UINT32_MAX)
+
 - are p_y_given_x/etc actually storing (x) and (1 - x) separately when this
   is not strictly necessary?
 - if density > 50%, flip bits before/after processing (so indexing works on

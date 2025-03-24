@@ -85,7 +85,7 @@ static int tk_bitmap_create (lua_State *L)
       lua_pushinteger(L, i); // t, n, b, i
       lua_gettable(L, -4); // t, n, b, bit
       if (lua_toboolean(L, -1))
-        roaring64_bitmap_add(bm, i - 1);
+        roaring64_bitmap_add(bm, (uint64_t) i - 1);
       lua_pop(L, 1); // t, n, b
     }
   }
@@ -100,7 +100,7 @@ static int tk_bitmap_get (lua_State *L)
   bit --;
   if (bit < 0)
     luaL_error(L, "bit index must be greater than zero");
-  lua_pushboolean(L, roaring64_bitmap_contains(bm, bit));
+  lua_pushboolean(L, roaring64_bitmap_contains(bm, (uint64_t) bit));
   return 1;
 }
 
@@ -117,9 +117,9 @@ static int tk_bitmap_set (lua_State *L)
     until --;
     if (until < bit)
       luaL_error(L, "end index must be greater than start index");
-    roaring64_bitmap_add_range_closed(bm, bit, until);
+    roaring64_bitmap_add_range_closed(bm, (uint64_t) bit, (uint64_t) until);
   } else {
-    roaring64_bitmap_add(bm, bit);
+    roaring64_bitmap_add(bm, (uint64_t) bit);
   }
   return 0;
 }
@@ -137,9 +137,9 @@ static int tk_bitmap_unset (lua_State *L)
     until --;
     if (until < bit)
       luaL_error(L, "end index must be greater than start index");
-    roaring64_bitmap_remove_range_closed(bm, bit, until);
+    roaring64_bitmap_remove_range_closed(bm, (uint64_t) bit, (uint64_t) until);
   } else {
-    roaring64_bitmap_remove(bm, bit);
+    roaring64_bitmap_remove(bm, (uint64_t) bit);
   }
   return 0;
 }
@@ -148,7 +148,7 @@ static int tk_bitmap_cardinality (lua_State *L)
 {
   lua_settop(L, 1);
   roaring64_bitmap_t *bm = peek(L, 1);
-  lua_pushinteger(L, roaring64_bitmap_get_cardinality(bm));
+  lua_pushinteger(L, (lua_Integer) roaring64_bitmap_get_cardinality(bm));
   return 1;
 }
 
@@ -156,7 +156,7 @@ static int tk_bitmap_minimum (lua_State *L)
 {
   lua_settop(L, 1);
   roaring64_bitmap_t *bm = peek(L, 1);
-  lua_pushinteger(L, roaring64_bitmap_minimum(bm) + 1);
+  lua_pushinteger(L, (lua_Integer) roaring64_bitmap_minimum(bm) + 1);
   return 1;
 }
 
@@ -164,7 +164,7 @@ static int tk_bitmap_maximum (lua_State *L)
 {
   lua_settop(L, 1);
   roaring64_bitmap_t *bm = peek(L, 1);
-  lua_pushinteger(L, roaring64_bitmap_maximum(bm) + 1);
+  lua_pushinteger(L, (lua_Integer) roaring64_bitmap_maximum(bm) + 1);
   return 1;
 }
 
@@ -246,13 +246,13 @@ static bool tk_bitmap_bits_iter (uint64_t val, void *statepv)
   lua_State *L = (lua_State *) statepv; // bm t bits n
   luaL_checktype(L, -3, LUA_TTABLE);
   lua_Integer bits = luaL_checkinteger(L, -2);
-  if (val + 1 > bits)
+  if (bits != -1 && val + 1 > (uint64_t) bits)
     return false;
   lua_Integer n = luaL_checkinteger(L, -1); // bm t bits n
-  lua_pushinteger(L, val + 1); // bm t bits n v
+  lua_pushinteger(L, (lua_Integer) val + 1); // bm t bits n v
   lua_settable(L, -4); // bm t bits
   lua_pushinteger(L, n + 1); // bm t bits n
-  return val + 1 < bits;
+  return val + 1 < (uint64_t) bits;
 }
 
 static int tk_bitmap_bits (lua_State *L)
@@ -260,16 +260,14 @@ static int tk_bitmap_bits (lua_State *L)
   lua_settop(L, 2); // bm bits
   roaring64_bitmap_t *bm = peek(L, 1);
   if (lua_type(L, 2) == LUA_TNIL) {
-    lua_pushinteger(L, UINT64_MAX); // bm nil bits
+    lua_pushinteger(L, -1); // bm nil bits
     lua_replace(L, 2); // bm bits
   }
   lua_newtable(L); // bm bits t
   lua_insert(L, 2); // bm t bits
   lua_pushinteger(L, 1); // bm t bits n
   roaring64_bitmap_iterate(bm, tk_bitmap_bits_iter, L); // bm t bits n
-  lua_pushnil(L); // bm t bits n nil
-  lua_settable(L, -4); // bm t bits
-  lua_pop(L, 1);
+  lua_pop(L, 2);
   return 1;
 }
 
@@ -346,7 +344,7 @@ static int tk_bitmap_extend (lua_State *L)
   if (n < 0)
     luaL_error(L, "extension starting index must be greater than 0");
   extend_state_t state;
-  state.n = n;
+  state.n = (uint64_t) n;
   state.bm = bm0;
   roaring64_bitmap_iterate(bm1, tk_bitmap_extend_iter, &state);
   return 0;
@@ -365,9 +363,9 @@ static int tk_bitmap_flip (lua_State *L)
     until --;
     if (until < bit)
       luaL_error(L, "end index must be greater than start index");
-    roaring64_bitmap_flip_inplace(bm, bit, until + 1);
+    roaring64_bitmap_flip_inplace(bm, (uint64_t) bit, (uint64_t) until + 1);
   } else {
-    roaring64_bitmap_flip_inplace(bm, 0, bit + 1);
+    roaring64_bitmap_flip_inplace(bm, 0, (uint64_t) bit + 1);
   }
   return 0;
 }
