@@ -1,10 +1,13 @@
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local str = require("santoku.string")
 local err = require("santoku.error")
+local fs = require("santoku.fs")
 local assert = err.assert
 local vdt = require("santoku.validate")
 local eq = vdt.isequal
 local bm = require("santoku.bitmap")
+local bmc = require("santoku.bitmap.compressor")
 
 test("chunk bits", function ()
   assert(eq(bm.chunk_bits, 32))
@@ -115,10 +118,12 @@ end)
 test("compress", function ()
   local rand = require("santoku.random")
   local originals = {}
-  local n_iterations = 10;
+  local n_iterations = 10
   local n_docs = 1000
   local n_cols_full = 784
   local n_cols_reduced = 512
+  local n_threads = 4
+  local eps = 1e-6
   for i = 1, n_docs do
     originals[i] = bm.create()
     for j = 1, n_cols_full do
@@ -127,14 +132,32 @@ test("compress", function ()
       end
     end
   end
-  local corpus = bm.matrix(originals, n_cols_full)
   local last = utc.time(true)
-  local compress = bm.compressor(
-    corpus, n_docs, n_cols_full, n_cols_reduced, n_iterations, nil, function (...)
+  local corpus_original = bm.matrix(originals, n_cols_full)
+  print()
+  local compressor = bmc.create({
+    corpus = corpus_original,
+    samples = n_docs,
+    visible = n_cols_full,
+    hidden = n_cols_reduced,
+    iterations = n_iterations,
+    threads = n_threads,
+    eps = eps,
+    each = function (i, c)
       local now = utc.time(true)
-      print(now - last, ...)
+      str.printf(" %3d   %3.4f   %8.4f\n", i, now - last, c)
       last = now
-    end)
-  corpus = compress(corpus, n_docs)
-  print(">>", bm.tostring(corpus, n_cols_reduced))
+    end
+  })
+  local corpus_compressed = compressor.compress(corpus_original, n_docs)
+  local corpus_compressed0 = compressor.compress(corpus_original, n_docs)
+  assert(bm.equals(corpus_compressed, corpus_compressed))
+  assert(bm.equals(corpus_compressed, corpus_compressed0))
+  fs.rm(".tmp.compressor.bin", true)
+  compressor.persist(".tmp.compressor.bin")
+  compressor.destroy()
+  compressor = bmc.load(".tmp.compressor.bin")
+  local corpus_compressed1 = compressor.compress(corpus_original, n_docs)
+  assert(bm.equals(corpus_compressed, corpus_compressed))
+  assert(bm.equals(corpus_compressed, corpus_compressed1))
 end)
