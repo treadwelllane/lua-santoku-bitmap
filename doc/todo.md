@@ -1,8 +1,5 @@
 # Now
 
-- compressor
-    - sanitizer/valgrind
-
 - are p_y_given_x/etc actually storing (x) and (1 - x) separately when this
   is not strictly necessary?
 - if density > 50%, flip bits before/after processing (so indexing works on
