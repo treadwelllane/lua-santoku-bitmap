@@ -167,7 +167,7 @@ static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
 static inline lua_Number tk_lua_foptnumber (lua_State *L, int i, char *field, double d)
 {
   lua_getfield(L, i, field);
-  lua_Integer n = luaL_optnumber(L, -1, d);
+  lua_Number n = luaL_optnumber(L, -1, d);
   lua_pop(L, 1);
   return n;
 }
@@ -1036,10 +1036,7 @@ static inline int tk_compressor_compress (lua_State *L)
   C->mis = tk_realloc(L, C->mis, C->n_hidden * n_samples * sizeof(double));
   C->pyx = tk_realloc(L, C->pyx, 2 * C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
-  unsigned int len_sums =
-    (2 * C->n_hidden * (n_samples < C->n_visible
-      ? C->n_visible
-      : n_samples));
+  unsigned int len_sums = (2 * C->n_hidden * (n_samples > C->n_visible ? n_samples : C->n_visible));
   C->sums = tk_realloc(L, C->sums, len_sums * sizeof(double));
   tk_compressor_signal(
     TK_CMP_LATENT_SUMSA,
@@ -1092,7 +1089,7 @@ static inline bool tk_compressor_converged (
   for (unsigned int j = i - 5; j < i; j ++)
     m1 += tc_history[j];
   m1 = m1 / 5;
-  return fabs(-m0 + m1) < eps;
+  return fabs(m1 - m0) <= eps;
 }
 
 static inline void tk_compressor_train (

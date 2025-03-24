@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.25-1",
+  version = "0.0.26-1",
   variable_prefix = "TK_BITMAP",
   public = true,
 
@@ -14,8 +14,6 @@ local env = {
   },
 
   test = {
-    -- cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
-    -- ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
     dependencies = {
       "santoku-fs == 0.0.34-1",
       "luacov == 0.15.0-1",
