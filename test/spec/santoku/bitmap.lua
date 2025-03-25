@@ -1,5 +1,6 @@
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local fs = require("santoku.fs")
@@ -123,7 +124,6 @@ test("compress", function ()
   local n_cols_full = 20
   local n_cols_reduced = 2
   local n_threads = 4
-  local eps = 1e-6
   for i = 1, n_docs do
     originals[i] = bm.create()
     for j = 1, n_cols_full do
@@ -132,21 +132,24 @@ test("compress", function ()
       end
     end
   end
-  local last = utc.time(true)
   local corpus_original = bm.matrix(originals, n_cols_full)
   print()
   local compressor = bmc.create({
-    corpus = corpus_original,
-    samples = n_docs,
     visible = n_cols_full,
     hidden = n_cols_reduced,
-    iterations = n_iterations,
     threads = n_threads,
-    eps = eps,
+  })
+  local stopwatch = utc.stopwatch(0.1)
+  local mavg = num.mavg(0.2)
+  compressor.train({
+    corpus = corpus_original,
+    samples = n_docs,
+    iterations = n_iterations,
     each = function (i, c)
-      local now = utc.time(true)
-      str.printf(" %3d   %3.4f   %8.4f\n", i, now - last, c)
-      last = now
+      local duration = stopwatch()
+      local ca = mavg(num.abs(c))
+      str.printf(" %3d   %3.4f   %6.4f   %6.4f\n", i, duration, c, ca)
+      return i < 5 or num.abs(c - ca) > 0.0001
     end
   })
   local corpus_compressed = compressor.compress(corpus_original, n_docs)

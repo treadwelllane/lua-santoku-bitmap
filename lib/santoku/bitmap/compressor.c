@@ -46,6 +46,7 @@ typedef struct {
 } tk_compressor_thread_data_t;
 
 typedef struct tk_compressor_s {
+  bool trained; // already trained
   bool destroyed;
   double *alpha;
   double *log_marg;
@@ -62,9 +63,8 @@ typedef struct tk_compressor_s {
   double *pyx;
   double *counts;
   double *smis;
-  double *tc_history;
+  double last_tc;
   double *tcs;
-  double eps;
   double lam;
   double tmin;
   double ttc;
@@ -281,7 +281,6 @@ static inline void tk_compressor_shrink (tk_compressor_t *C)
   free(C->entropy_x); C->entropy_x = NULL;
   free(C->counts); C->counts = NULL;
   free(C->smis); C->smis = NULL;
-  free(C->tc_history); C->tc_history = NULL;
   free(C->tcs); C->tcs = NULL;
 }
 
@@ -729,16 +728,15 @@ static inline void tk_compressor_update_tc_thread (
   }
 }
 
-static inline void tk_compressor_update_tc_history (
-  unsigned int i,
+static inline void tk_compressor_update_last_tc (
   double *restrict tcs,
-  double *restrict tc_history,
+  double *last_tc,
   unsigned int n_hidden
 ) {
   double sum0 = 0.0;
   for (unsigned int h = 0; h < n_hidden; h ++)
     sum0 += tcs[h];
-  tc_history[i] = sum0;
+  *last_tc = sum0;
 }
 
 typedef struct {
@@ -1074,73 +1072,25 @@ static inline int tk_compressor_compress (lua_State *L)
   return 1;
 }
 
-static inline bool tk_compressor_converged (
-  unsigned int i,
-  double eps,
-  double *tc_history
-) {
-  if (i < 10)
-    return false;
-  double m0 = 0.0;
-  for (unsigned int j = i - 10; j < i - 5; j ++)
-    m0 += tc_history[j];
-  m0 = m0 / 5;
-  double m1 = 0.0;
-  for (unsigned int j = i - 5; j < i; j ++)
-    m1 += tc_history[j];
-  m1 = m1 / 5;
-  return fabs(m1 - m0) <= eps;
-}
-
-static inline void tk_compressor_train (
+static inline void _tk_compressor_train (
   lua_State *L,
   tk_compressor_t *C,
   roaring64_bitmap_t *bm,
   unsigned int n_samples,
-  unsigned int n_visible,
-  unsigned int n_hidden,
   unsigned int max_iter,
-  unsigned int n_threads,
-  double eps,
   int i_each
 ) {
-  memset(C, 0, sizeof(tk_compressor_t));
-  C->n_visible = n_visible;
-  C->n_hidden = n_hidden;
-  C->lam = 0.3;
-  C->tmin = 1.0;
-  C->ttc = 500.0;
   C->pyx = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
-  C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
-  C->tc_history = tk_malloc(L, max_iter * sizeof(double));
-  C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
-  C->log_py = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
-  C->px = tk_malloc(L, C->n_visible * sizeof(double));
-  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
-  C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
-  C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   unsigned int len_mis = C->n_hidden * C->n_visible;
   if (len_mis < (C->n_hidden * n_samples))
     len_mis = C->n_hidden * n_samples;
   C->mis = tk_malloc(L, len_mis * sizeof(double));
-  C->smis = tk_malloc(L, C->n_hidden * C->n_visible * 2 * sizeof(double));
-  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
   C->sums = tk_malloc(L, 2 * n_samples * C->n_hidden * sizeof(double));
-  C->sumsa = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
   C->samples = tk_malloc(L, cardinality * sizeof(uint64_t));
   C->visibles = tk_malloc(L, cardinality * sizeof(unsigned int));
   tk_compressor_setup_bits(bm, C->samples, C->visibles, C->n_visible);
-  C->n_threads = n_threads;
-  C->n_threads_done = 0;
-  C->stage = TK_CMP_INIT;
-  C->threads = tk_malloc(L, C->n_threads * sizeof(pthread_t));
-  C->thread_data = tk_malloc(L, C->n_threads * sizeof(tk_compressor_thread_data_t));
-  // TODO: check errors
-  pthread_mutex_init(&C->mutex, NULL);
-  pthread_cond_init(&C->cond_stage, NULL);
-  pthread_cond_init(&C->cond_done, NULL);
   tk_compressor_setup_threads(L, C, cardinality, n_samples);
   tk_compressor_data_stats(
     cardinality,
@@ -1165,8 +1115,7 @@ static inline void tk_compressor_train (
     TK_CMP_LATENT_NORM,
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
     &C->n_threads_done, C->n_threads);
-  unsigned int i = 0;
-  while (i < max_iter) {
+  for (unsigned int i = 0; i < max_iter; i ++) {
     tk_compressor_signal(
       TK_CMP_MARGINALS,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
@@ -1199,32 +1148,83 @@ static inline void tk_compressor_train (
       TK_CMP_UPDATE_TC,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
-    tk_compressor_update_tc_history(
-      i,
+    tk_compressor_update_last_tc(
       C->tcs,
-      C->tc_history,
+      &C->last_tc,
       C->n_hidden);
-    bool converged = tk_compressor_converged(i, eps, C->tc_history);
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
-      lua_pushnumber(L, C->tc_history[i]);
-      lua_pushboolean(L, converged);
-      lua_call(L, 3, 0);
+      lua_pushnumber(L, C->last_tc);
+      lua_call(L, 2, 1);
+      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0)
+        break;
+      lua_pop(L, 1);
     }
-    if (converged)
-      break;
-    else
-      i ++;
   }
   tk_compressor_shrink(C);
+  C->trained = true;
+}
+
+static inline void tk_compressor_init (
+  lua_State *L,
+  tk_compressor_t *C,
+  unsigned int n_visible,
+  unsigned int n_hidden,
+  unsigned int n_threads
+) {
+  memset(C, 0, sizeof(tk_compressor_t));
+  C->n_visible = n_visible;
+  C->n_hidden = n_hidden;
+  C->lam = 0.3;
+  C->tmin = 1.0;
+  C->ttc = 500.0;
+  C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
+  C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
+  C->log_py = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
+  C->px = tk_malloc(L, C->n_visible * sizeof(double));
+  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
+  C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
+  C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
+  C->smis = tk_malloc(L, C->n_hidden * C->n_visible * 2 * sizeof(double));
+  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
+  C->sumsa = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
+  C->n_threads = n_threads;
+  C->n_threads_done = 0;
+  C->stage = TK_CMP_INIT;
+  C->threads = tk_malloc(L, C->n_threads * sizeof(pthread_t));
+  C->thread_data = tk_malloc(L, C->n_threads * sizeof(tk_compressor_thread_data_t));
+  // TODO: check errors
+  pthread_mutex_init(&C->mutex, NULL);
+  pthread_cond_init(&C->cond_stage, NULL);
+  pthread_cond_init(&C->cond_done, NULL);
+}
+
+static inline int tk_compressor_train (lua_State *L) {
+  tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
+  if (C->trained)
+    return tk_lua_error(L, "Already trained!\n");
+  roaring64_bitmap_t *bm = *((roaring64_bitmap_t **)
+    tk_lua_fcheckuserdata(L, 1, "corpus", MT_BITMAP));
+  unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "samples");
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "iterations");
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+  _tk_compressor_train(L, C, bm, n_samples, max_iter, i_each); // c
+  return 0;
 }
 
 static inline int tk_compressor_persist (lua_State *L)
 {
   tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
+  if (!C->trained)
+    return tk_lua_error(L, "Can't persist an untrained model\n");
   const char *fp = luaL_checkstring(L, 1);
   FILE *fh = tk_lua_fopen(L, fp, "w");
+  tk_lua_fwrite(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fwrite(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->lam, sizeof(double), 1, fh);
@@ -1242,6 +1242,7 @@ static luaL_Reg mt_fns[] =
 {
   { "compress", tk_compressor_compress },
   { "persist", tk_compressor_persist },
+  { "train", tk_compressor_train },
   { "destroy", tk_compressor_destroy },
   { NULL, NULL }
 };
@@ -1274,6 +1275,7 @@ static inline int tk_compressor_load (lua_State *L)
     lua_pop(L, 1);
   }
   FILE *fh = tk_lua_fopen(L, fp, "r");
+  tk_lua_fread(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fread(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &C->lam, sizeof(double), 1, fh);
@@ -1302,12 +1304,8 @@ static inline int tk_compressor_load (lua_State *L)
 static inline int tk_compressor_create (lua_State *L)
 {
   lua_settop(L, 1);
-  roaring64_bitmap_t *bm = *((roaring64_bitmap_t **)
-    tk_lua_fcheckuserdata(L, 1, "corpus", MT_BITMAP));
-  unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "samples");
   unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "visible");
   unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "hidden");
-  unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "iterations");
   unsigned int n_threads;
   if (tk_lua_ftype(L, 1, "threads") != LUA_TNIL) {
     // TODO: allow passing 0 to run everything on the main thread.
@@ -1322,20 +1320,13 @@ static inline int tk_compressor_create (lua_State *L)
     n_threads = tk_lua_checkunsigned(L, -1);
     lua_pop(L, 1);
   }
-  double eps = tk_lua_foptnumber(L, 1, "eps", 1e-6);
-  int i_each = -1;
-  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
-    lua_getfield(L, 1, "each");
-    i_each = tk_lua_absindex(L, -1);
-  }
   tk_compressor_t *C = (tk_compressor_t *)
     lua_newuserdata(L, sizeof(tk_compressor_t)); // c
   luaL_getmetatable(L, MT_COMPRESSOR); // c mt
   lua_setmetatable(L, -2); // c
-  int i_c = tk_lua_absindex(L, -1);
-  tk_compressor_train(L, C, bm, n_samples, n_visible, n_hidden, max_iter, n_threads, eps, i_each); // c
+  tk_compressor_init(L, C, n_visible, n_hidden, n_threads); // c
   lua_newtable(L); // c t
-  lua_pushvalue(L, i_c);
+  lua_pushvalue(L, -2); // c t c
   tk_lua_register(L, mt_fns, 1); // t
   return 1;
 }
