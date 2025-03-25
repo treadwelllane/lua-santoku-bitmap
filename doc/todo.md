@@ -1,8 +1,6 @@
 # Now
 
-- Separate create and train functions
-- Rename compress to encode
-- Determine stopping condition in callback, not in C
+- Persist to string or chunked callbacks
 
 # Later
 
