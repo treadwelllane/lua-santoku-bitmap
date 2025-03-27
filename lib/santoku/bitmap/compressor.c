@@ -105,6 +105,19 @@ static inline int tk_lua_error (lua_State *L, const char *err)
   return 0;
 }
 
+static inline FILE *tk_lua_fmemopen (lua_State *L, char *data, size_t size, const char *flag)
+{
+  FILE *fh = fmemopen(data, size, flag);
+  if (fh) return fh;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error opening string as file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+  return NULL;
+}
+
 static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
 {
   FILE *fh = fopen(fp, flag);
@@ -152,6 +165,63 @@ static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t m
   lua_pushstring(L, strerror(e));
   lua_pushinteger(L, e);
   tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
+static inline int tk_lua_errno (lua_State *L, int err)
+{
+  lua_pushstring(L, strerror(errno));
+  lua_pushinteger(L, err);
+  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
+  return 0;
+}
+
+static inline int tk_lua_errmalloc (lua_State *L)
+{
+  lua_pushstring(L, "Error in malloc");
+  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
+  return 0;
+}
+
+static inline FILE *tk_lua_tmpfile (lua_State *L)
+{
+  FILE *fh = tmpfile();
+  if (fh) return fh;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error opening tmpfile");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+  return NULL;
+}
+
+static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
+{
+  if (fseek(fh, 0, SEEK_END) != 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  long size = ftell(fh);
+  if (size < 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  if (fseek(fh, 0, SEEK_SET) != 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  char *buffer = malloc((size_t) size);
+  if (!buffer) {
+    tk_lua_errmalloc(L);
+    return NULL;
+  }
+  if (fread(buffer, 1, (size_t) size, fh) != (size_t) size) {
+    free(buffer);
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  *len = (size_t) size;
+  return buffer;
 }
 
 static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
@@ -306,8 +376,9 @@ static int tk_compressor_gc (lua_State *L)
   pthread_mutex_unlock(&C->mutex);
   // TODO: What is the right way to deal with potential thread errors (or other
   // errors, for that matter) during the finalizer?
-  for (unsigned int i = 0; i < C->n_threads; i ++)
-    pthread_join(C->threads[i], NULL);
+  if (C->created_threads)
+    for (unsigned int i = 0; i < C->n_threads; i ++)
+      pthread_join(C->threads[i], NULL);
     // if (pthread_join(C->threads[i], NULL) != 0)
     //   tk_error(L, "pthread_join", errno);
   pthread_mutex_destroy(&C->mutex);
@@ -1222,8 +1293,9 @@ static inline int tk_compressor_persist (lua_State *L)
   tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
   if (!C->trained)
     return tk_lua_error(L, "Can't persist an untrained model\n");
-  const char *fp = luaL_checkstring(L, 1);
-  FILE *fh = tk_lua_fopen(L, fp, "w");
+  lua_settop(L, 1);
+  bool tostr = lua_type(L, 1) == LUA_TNIL;
+  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 1), "w");
   tk_lua_fwrite(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fwrite(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
@@ -1234,8 +1306,22 @@ static inline int tk_compressor_persist (lua_State *L)
   tk_lua_fwrite(L, C->log_py, sizeof(double), 2 * C->n_hidden, fh);
   tk_lua_fwrite(L, C->log_marg, sizeof(double), 2 * 2 * C->n_hidden * C->n_visible, fh);
   tk_lua_fwrite(L, C->sumsa, sizeof(double), 2 * C->n_hidden, fh);
-  tk_lua_fclose(L, fh);
-  return 0;
+  if (!tostr) {
+    tk_lua_fclose(L, fh);
+    return 0;
+  } else {
+    size_t len;
+    char *data = tk_lua_fslurp(L, fh, &len);
+    if (data) {
+      lua_pushlstring(L, data, len);
+      free(data);
+      tk_lua_fclose(L, fh);
+      return 1;
+    } else {
+      tk_lua_fclose(L, fh);
+      return 0;
+    }
+  }
 }
 
 static luaL_Reg mt_fns[] =
@@ -1249,7 +1335,7 @@ static luaL_Reg mt_fns[] =
 
 static inline int tk_compressor_load (lua_State *L)
 {
-  lua_settop(L, 2); // fp ts
+  lua_settop(L, 3); // fp ts
   tk_compressor_t *C = (tk_compressor_t *)
     lua_newuserdata(L, sizeof(tk_compressor_t)); // tp ts c
   memset(C, 0, sizeof(tk_compressor_t));
@@ -1259,7 +1345,6 @@ static inline int tk_compressor_load (lua_State *L)
   lua_pushvalue(L, -2); // fp ts c t c
   tk_lua_register(L, mt_fns, 1); // fp ts c t
   lua_remove(L, -2); // fp ts t
-  const char *fp = luaL_checkstring(L, 1);
   unsigned int n_threads;
   if (lua_type(L, 2) != LUA_TNIL) {
     // TODO: allow passing 0 to run everything on the main thread.
@@ -1274,7 +1359,10 @@ static inline int tk_compressor_load (lua_State *L)
     n_threads = tk_lua_checkunsigned(L, -1);
     lua_pop(L, 1);
   }
-  FILE *fh = tk_lua_fopen(L, fp, "r");
+  size_t len;
+  const char *data = luaL_checklstring(L, 1, &len);
+  bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
+  FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tk_lua_fread(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fread(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
