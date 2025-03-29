@@ -888,12 +888,17 @@ static inline void tk_compressor_init_tcs_thread (
 static inline void tk_compressor_init_log_pyx_unnorm_thread (
   double *log_pyx_unnorm,
   unsigned int n_samples,
+  unsigned int n_hidden,
   unsigned int hfirst,
   unsigned int hlast
 ) {
   double log_dim_hidden = -log(2);
-  for (unsigned int i = hfirst * n_samples; i < (hlast + 1) * n_samples; i ++)
-    log_pyx_unnorm[i] = log_dim_hidden * (0.5 + fast_drand());
+  double *restrict lpyx0 = log_pyx_unnorm + 0 * n_hidden * n_samples;
+  double *restrict lpyx1 = log_pyx_unnorm + 1 * n_hidden * n_samples;
+  for (unsigned int i = hfirst * n_samples; i < (hlast + 1) * n_samples; i ++) {
+    lpyx0[i] = log_dim_hidden * (0.5 + fast_drand());
+    lpyx1[i] = log_dim_hidden * (0.5 + fast_drand());
+  }
 }
 
 static void *tk_compressor_worker (void *datap)
@@ -927,6 +932,7 @@ static void *tk_compressor_worker (void *datap)
         tk_compressor_init_log_pyx_unnorm_thread(
           data->C->log_pyx_unnorm,
           data->n_samples,
+          data->C->n_hidden,
           data->hfirst,
           data->hlast);
         break;
@@ -1153,11 +1159,11 @@ static inline void _tk_compressor_train (
 ) {
   C->pyx = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
+  C->sums = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   unsigned int len_mis = C->n_hidden * C->n_visible;
   if (len_mis < (C->n_hidden * n_samples))
     len_mis = C->n_hidden * n_samples;
   C->mis = tk_malloc(L, len_mis * sizeof(double));
-  C->sums = tk_malloc(L, 2 * n_samples * C->n_hidden * sizeof(double));
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
   C->samples = tk_malloc(L, cardinality * sizeof(uint64_t));
   C->visibles = tk_malloc(L, cardinality * sizeof(unsigned int));
@@ -1253,13 +1259,13 @@ static inline void tk_compressor_init (
   C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
   C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
   C->log_py = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
-  C->px = tk_malloc(L, C->n_visible * sizeof(double));
-  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
   C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
-  C->smis = tk_malloc(L, C->n_hidden * C->n_visible * 2 * sizeof(double));
-  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
+  C->smis = tk_malloc(L, 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->sumsa = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
+  C->px = tk_malloc(L, C->n_visible * sizeof(double));
+  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
+  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
   C->n_threads = n_threads;
   C->n_threads_done = 0;
   C->stage = TK_CMP_INIT;
