@@ -5,7 +5,7 @@ local env = {
   variable_prefix = "TK_BITMAP",
   public = true,
 
-  cflags = { "-march=native", "-O3", "-Wall", "-Wextra", "-Wsign-conversion", "-Wsign-compare", "-Wstrict-overflow", "-Wpointer-sign", },
+  cflags = { "-march=native", "-O3", "-Wall", "-Wextra", "-Wno-sign-conversion", "-Wsign-compare", "-Wstrict-overflow", "-Wpointer-sign", },
   ldflags = { "-march=native", "-O3", "-lm", "-lpthread", },
 
   dependencies = {

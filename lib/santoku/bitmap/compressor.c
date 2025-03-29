@@ -1,5 +1,6 @@
 #include "lua.h"
 #include "lauxlib.h"
+#include "khash.h"
 #include "roaring.h"
 #include "roaring.c"
 #include <string.h>
@@ -12,6 +13,71 @@
 
 #define MT_BITMAP "santoku_bitmap"
 #define MT_COMPRESSOR "santoku_bitmap_compressor"
+
+typedef struct {
+  unsigned int d0;
+  unsigned int d1;
+  unsigned int h;
+  unsigned int v;
+} mtx_key_t;
+
+static inline int mtx_hash (mtx_key_t k)
+{
+  khint_t a = kh_int_hash_func(k.d0);
+  khint_t b = kh_int_hash_func(k.d1);
+  khint_t c = kh_int_hash_func(k.h);
+  khint_t d = kh_int_hash_func(k.v);
+  khint_t hash = a;
+  hash = a * 31 + b;
+  hash = b * 31 + c;
+  hash = c * 31 + d;
+  return hash;
+}
+
+static inline int mtx_equals (mtx_key_t a, mtx_key_t b)
+{
+  return a.d0 == b.d0 && a.d1 == b.d1 && a.h == b.h && a.v == b.v;
+}
+
+KHASH_INIT(mtx, mtx_key_t, double, 1, mtx_hash, mtx_equals);
+typedef khash_t(mtx) tb_mtx_t;
+
+static inline void mtx_add (tb_mtx_t *m, unsigned int d0, unsigned int d1, unsigned int h, unsigned int v, double x)
+{
+  if (x == 0) return;
+  mtx_key_t i = { .d0 = d0, .d1 = d1, .h = h, .v = v };
+  int absent;
+  khint_t k = kh_put(mtx, m, i, &absent);
+  kh_value(m, k) = absent ? x : kh_value(m, k) + x;
+}
+
+static inline void mtx_set (tb_mtx_t *m, unsigned int d0, unsigned int d1, unsigned int h, unsigned int v, double x)
+{
+  mtx_key_t i = { .d0 = d0, .d1 = d1, .h = h, .v = v };
+  int absent;
+  khint_t k = kh_put(mtx, m, i, &absent);
+  if (!absent && x == 0) kh_del(mtx, m, k);
+  else if (!absent || x != 0) kh_value(m, k) = x;
+}
+
+static inline double mtx_get (tb_mtx_t *m, unsigned int d0, unsigned int d1, unsigned int h, unsigned int v)
+{
+  mtx_key_t i = { .d0 = d0, .d1 = d1, .h = h, .v = v };
+  khint_t k = kh_get(mtx, m, i);
+  return k == kh_end(m) ? 0 : kh_value(m, k);
+}
+
+#define lm_clear(C) kh_clear(mtx, C->lm)
+#define lm_add(C, d0, d1, h, v, x) mtx_add((C)->lm, d0, d1, h, v, x)
+#define lm_set(C, d0, d1, h, v, x) mtx_set((C)->lm, d0, d1, h, v, x)
+#define lm_del(C, d0, d1, h, v) mtx_set((C)->lm, d0, d1, h, v, 0)
+#define lm_get(C, d0, d1, h, v) mtx_get((C)->lm, d0, d1, h, v)
+
+#define pc_clear(C) kh_clear(mtx, C->cnt)
+#define pc_add(C, d0, d1, h, v, x) mtx_add((C)->cnt, d0, d1, h, v, x)
+#define pc_set(C, d0, d1, h, v, x) mtx_set((C)->cnt, d0, d1, h, v, x)
+#define pc_del(C, d0, d1, h, v) mtx_set((C)->cnt, d0, d1, h, v, 0)
+#define pc_get(C, d0, d1, h, v) mtx_get((C)->cnt, d0, d1, h, v)
 
 typedef enum {
   TK_CMP_INIT,
@@ -49,7 +115,10 @@ typedef struct tk_compressor_s {
   bool trained; // already trained
   bool destroyed;
   double *alpha;
-  double *log_marg;
+  tb_mtx_t *lm;
+  tb_mtx_t *cnt;
+  double *ps;
+  double *tmp;
   double *log_py;
   double *log_pyx_unnorm;
   double *maxmis;
@@ -61,7 +130,6 @@ typedef struct tk_compressor_s {
   double *px;
   double *entropy_x;
   double *pyx;
-  double *counts;
   double *smis;
   double last_tc;
   double *tcs;
@@ -347,9 +415,11 @@ static inline void tk_compressor_shrink (tk_compressor_t *C)
   free(C->maxmis); C->maxmis = NULL;
   free(C->mis); C->mis = NULL;
   free(C->sums); C->sums = NULL;
+  free(C->ps); C->ps = NULL;
   free(C->px); C->px = NULL;
   free(C->entropy_x); C->entropy_x = NULL;
-  free(C->counts); C->counts = NULL;
+  free(C->tmp); C->tmp = NULL;
+  if (C->cnt) { kh_destroy(mtx, C->cnt); C->cnt = NULL; }
   free(C->smis); C->smis = NULL;
   free(C->tcs); C->tcs = NULL;
 }
@@ -363,7 +433,7 @@ static int tk_compressor_gc (lua_State *L)
   C->destroyed = true;
   tk_compressor_shrink(C);
   free(C->alpha); C->alpha = NULL;
-  free(C->log_marg); C->log_marg = NULL;
+  kh_destroy(mtx, C->lm); C->lm = NULL;
   free(C->log_py); C->log_py = NULL;
   free(C->log_pyx_unnorm); C->log_pyx_unnorm = NULL;
   free(C->pyx); C->pyx = NULL;
@@ -441,13 +511,13 @@ static inline void tk_compressor_signal (
 }
 
 static inline void tk_compressor_marginals_thread (
+  tk_compressor_t *C,
   uint64_t cardinality,
   uint64_t *restrict samples,
   unsigned int *restrict visibles,
   double *restrict log_py,
   double *restrict pyx,
-  double *restrict counts,
-  double *restrict log_marg,
+  double *restrict tmp,
   double *restrict mis,
   double *restrict smis,
   double *restrict px,
@@ -461,18 +531,10 @@ static inline void tk_compressor_marginals_thread (
   unsigned int hfirst,
   unsigned int hlast
 ) {
-  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
-  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
-  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
-  double *restrict pc00 = counts + 0 * n_hidden * n_visible;
-  double *restrict pc01 = counts + 1 * n_hidden * n_visible;
-  double *restrict pc10 = counts + 2 * n_hidden * n_visible;
-  double *restrict pc11 = counts + 3 * n_hidden * n_visible;
-  double *restrict tmp00 = lm00 + hfirst * n_visible;
-  double *restrict tmp01 = lm01 + hfirst * n_visible;
-  double *restrict tmp10 = lm10 + hfirst * n_visible;
-  double *restrict tmp11 = lm11 + hfirst * n_visible;
+  double *restrict tmp00 = tmp + 0 * n_visible;
+  double *restrict tmp01 = tmp + 1 * n_visible;
+  double *restrict tmp10 = tmp + 2 * n_visible;
+  double *restrict tmp11 = tmp + 3 * n_visible;
   double *restrict lpy0 = log_py + 0 * n_hidden;
   double *restrict lpy1 = log_py + 1 * n_hidden;
   double *restrict smis0 = smis + 0 * n_hidden * n_visible;
@@ -490,8 +552,14 @@ static inline void tk_compressor_marginals_thread (
     lpy0[h] = log(counts_0) - log(sum_counts);
     lpy1[h] = log(counts_1) - log(sum_counts);
   }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i++)
-    counts[i] = 0;
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      pc_del(C, 0, 0, h, v);
+      pc_del(C, 0, 1, h, v);
+      pc_del(C, 1, 0, h, v);
+      pc_del(C, 1, 1, h, v);
+    }
+  }
   for (unsigned int h = hfirst; h <= hlast; h ++) {
     double sum_py0 = 0.0;
     double sum_py1 = 0.0;
@@ -501,11 +569,9 @@ static inline void tk_compressor_marginals_thread (
       sum_py0 += hpy0s[s];
     for (unsigned int s = 0; s < n_samples; s ++)
       sum_py1 += hpy1s[s];
-    double *restrict pc00a = pc00 + h * n_visible;
-    double *restrict pc01a = pc01 + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
-      pc00a[v] += sum_py0;
-      pc01a[v] += sum_py1;
+      pc_add(C, 0, 0, h, v, sum_py0);
+      pc_add(C, 0, 1, h, v, sum_py1);
     }
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) {
@@ -525,69 +591,57 @@ static inline void tk_compressor_marginals_thread (
       tmp00[v] -= py0;
       tmp01[v] -= py1;
     }
-    double *restrict pc00a = pc00 + h * n_visible;
-    double *restrict pc01a = pc01 + h * n_visible;
-    double *restrict pc10a = pc10 + h * n_visible;
-    double *restrict pc11a = pc11 + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
-      pc10a[v] += tmp10[v];
-      pc11a[v] += tmp11[v];
-      pc00a[v] += tmp00[v];
-      pc01a[v] += tmp01[v];
+      pc_add(C, 1, 0, h, v, tmp10[v]);
+      pc_add(C, 1, 1, h, v, tmp11[v]);
+      pc_add(C, 0, 0, h, v, tmp00[v]);
+      pc_add(C, 0, 1, h, v, tmp01[v]);
     }
   }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
-    pc00[i] += 0.001;
-    pc01[i] += 0.001;
-    pc10[i] += 0.001;
-    pc11[i] += 0.001;
-  }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
-    double log_total0 = log(pc00[i] + pc01[i]);
-    lm00[i] = log(pc00[i]) - log_total0;
-    lm01[i] = log(pc01[i]) - log_total0;
-  }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
-    double log_total1 = log(pc10[i] + pc11[i]);
-    lm10[i] = log(pc10[i]) - log_total1;
-    lm11[i] = log(pc11[i]) - log_total1;
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      double pc00 = pc_get(C, 0, 0, h, v) + 0.001;
+      double pc01 = pc_get(C, 0, 1, h, v) + 0.001;
+      double pc10 = pc_get(C, 1, 0, h, v) + 0.001;
+      double pc11 = pc_get(C, 1, 1, h, v) + 0.001;
+      double log_total0 = log(pc00 + pc01);
+      double log_total1 = log(pc10 + pc11);
+      lm_set(C, 0, 0, h, v, log(pc00) - log_total0);
+      lm_set(C, 0, 1, h, v, log(pc01) - log_total0);
+      lm_set(C, 1, 0, h, v, log(pc10) - log_total1);
+      lm_set(C, 1, 1, h, v, log(pc11) - log_total1);
+    }
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) {
-    double *restrict lm00a = lm00 + h * n_visible;
-    double *restrict lm01a = lm01 + h * n_visible;
-    double *restrict lm10a = lm10 + h * n_visible;
-    double *restrict lm11a = lm11 + h * n_visible;
     double lpy0v = lpy0[h];
     double lpy1v = lpy1[h];
     for (unsigned int v = 0; v < n_visible; v ++) {
-      lm00a[v] -= lpy0v;
-      lm01a[v] -= lpy1v;
-      lm10a[v] -= lpy0v;
-      lm11a[v] -= lpy1v;
+      lm_add(C, 0, 0, h, v, -lpy0v);
+      lm_add(C, 0, 1, h, v, -lpy1v);
+      lm_add(C, 1, 0, h, v, -lpy0v);
+      lm_add(C, 1, 1, h, v, -lpy1v);
     }
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine base
-    double *restrict lm00a = lm00 + h * n_visible;
-    double *restrict lm01a = lm01 + h * n_visible;
-    double *restrict lm10a = lm10 + h * n_visible;
-    double *restrict lm11a = lm11 + h * n_visible;
-    double *restrict pc00a = pc00 + h * n_visible;
-    double *restrict pc01a = pc01 + h * n_visible;
-    double *restrict pc10a = pc10 + h * n_visible;
-    double *restrict pc11a = pc11 + h * n_visible;
     double lpy0v = lpy0[h];
     double lpy1v = lpy1[h];
     for (unsigned int v = 0; v < n_visible; v ++) {
-      pc00a[v] = exp(lm00a[v] + lpy0v);
-      pc01a[v] = exp(lm01a[v] + lpy1v);
-      pc10a[v] = exp(lm10a[v] + lpy0v);
-      pc11a[v] = exp(lm11a[v] + lpy1v);
+      pc_add(C, 0, 0, h, v, exp(lm_get(C, 0, 0, h, v) + lpy0v));
+      pc_add(C, 0, 1, h, v, exp(lm_get(C, 0, 1, h, v) + lpy1v));
+      pc_add(C, 1, 0, h, v, exp(lm_get(C, 1, 0, h, v) + lpy0v));
+      pc_add(C, 1, 1, h, v, exp(lm_get(C, 1, 1, h, v) + lpy1v));
     }
   }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++)
-    smis0[i] = pc00[i] * lm00[i] + pc01[i] * lm01[i];
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++)
-    smis1[i] = pc10[i] * lm10[i] + pc11[i] * lm11[i];
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
+      double pc00 = pc_get(C, 0, 0, h, v) + 0.001;
+      double pc01 = pc_get(C, 0, 1, h, v) + 0.001;
+      double pc10 = pc_get(C, 1, 0, h, v) + 0.001;
+      double pc11 = pc_get(C, 1, 1, h, v) + 0.001;
+      smis0[h * n_visible + v] = pc00 * lm_get(C, 0, 0, h, v) + pc01 * lm_get(C, 0, 1, h, v);
+      smis1[h * n_visible + v] = pc10 * lm_get(C, 1, 0, h, v) + pc11 * lm_get(C, 1, 1, h, v);
+    }
+  }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, dominance boundary
     double *restrict smis0a = smis0 + h * n_visible;
     double *restrict smis1a = smis1 + h * n_visible;
@@ -626,10 +680,10 @@ static inline void tk_compressor_maxmis_thread (
 }
 
 static inline void tk_compressor_alpha_thread (
+  tk_compressor_t *C,
   double *restrict alpha,
   double *restrict sumsa,
-  double *restrict log_marg,
-  double *restrict counts,
+  double *restrict ps,
   double *restrict tcs,
   double *restrict mis,
   double *restrict maxmis,
@@ -641,29 +695,25 @@ static inline void tk_compressor_alpha_thread (
 ) {
   double *restrict sumsa0 = sumsa + 0 * n_hidden;
   double *restrict sumsa1 = sumsa + 1 * n_hidden;
-  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
-  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine base or splitting at boundary
     double t = tcs[h];
     double *restrict mish = mis + h * n_visible;
-    double *restrict ps = counts + h * n_visible;
+    double *restrict psh = ps + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++)
-      ps[v] = exp(t * (mish[v] - maxmis[v]));
+      psh[v] = exp(t * (mish[v] - maxmis[v]));
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine
     double *restrict alphah = alpha + h * n_visible;
-    double *restrict ps = counts + h * n_visible;
+    double *restrict psh = ps + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++)
-      alphah[v] = (1.0 - lam) * alphah[v] + lam * ps[v];
+      alphah[v] = (1.0 - lam) * alphah[v] + lam * psh[v];
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, unsupported outer form
     double s0 = 0.0, s1 = 0.0;
-    double *restrict lm00a = lm00 + h * n_visible;
-    double *restrict lm01a = lm01 + h * n_visible;
     double *restrict aph = alpha + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
-      s0 += aph[v] * lm00a[v];
-      s1 += aph[v] * lm01a[v];
+      s0 += aph[v] * lm_get(C, 0, 0, h, v);
+      s1 += aph[v] * lm_get(C, 0, 1, h, v);
     }
     sumsa0[h] = s0;
     sumsa1[h] = s1;
@@ -695,10 +745,10 @@ static inline void tk_compressor_latent_sumsa_thread (
 }
 
 static inline void tk_compressor_latent_sums_thread (
+  tk_compressor_t *C,
   uint64_t *restrict samples,
   unsigned int *restrict visibles,
   double *restrict alpha,
-  double *restrict log_marg,
   double *restrict sums,
   unsigned int n_samples,
   unsigned int n_visible,
@@ -708,23 +758,15 @@ static inline void tk_compressor_latent_sums_thread (
 ) {
   double *restrict sums0 = sums + 0 * n_hidden * n_samples;
   double *restrict sums1 = sums + 1 * n_hidden * n_samples;
-  double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
-  double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
-  double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
   for (unsigned int b = bfirst; b <= blast; b ++) {
     uint64_t s = samples[b];
     unsigned int v = visibles[b];
     for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, gather/scatter
       double *restrict sums0h = sums0 + h * n_samples;
       double *restrict sums1h = sums1 + h * n_samples;
-      double *restrict lm00a = lm00 + h * n_visible;
-      double *restrict lm01a = lm01 + h * n_visible;
-      double *restrict lm10a = lm10 + h * n_visible;
-      double *restrict lm11a = lm11 + h * n_visible;
       double *restrict aph = alpha + h * n_visible;
-      sums0h[s] = sums0h[s] - aph[v] * lm00a[v] + aph[v] * lm10a[v]; // gather/scatter
-      sums1h[s] = sums1h[s] - aph[v] * lm01a[v] + aph[v] * lm11a[v]; // gather/scatter
+      sums0h[s] = sums0h[s] - aph[v] * lm_get(C, 0, 0, h, v) + aph[v] * lm_get(C, 1, 0, h, v); // gather/scatter
+      sums1h[s] = sums1h[s] - aph[v] * lm_get(C, 0, 1, h, v) + aph[v] * lm_get(C, 1, 1, h, v); // gather/scatter
     }
   }
 }
@@ -932,13 +974,13 @@ static void *tk_compressor_worker (void *datap)
         break;
       case TK_CMP_MARGINALS:
         tk_compressor_marginals_thread(
+          data->C,
           data->cardinality,
           data->C->samples,
           data->C->visibles,
           data->C->log_py,
           data->C->pyx,
-          data->C->counts,
-          data->C->log_marg,
+          data->C->tmp,
           data->C->mis,
           data->C->smis,
           data->C->px,
@@ -963,10 +1005,10 @@ static void *tk_compressor_worker (void *datap)
         break;
       case TK_CMP_ALPHA:
         tk_compressor_alpha_thread(
+          data->C,
           data->C->alpha,
           data->C->sumsa,
-          data->C->log_marg,
-          data->C->counts,
+          data->C->ps,
           data->C->tcs,
           data->C->mis,
           data->C->maxmis,
@@ -987,10 +1029,10 @@ static void *tk_compressor_worker (void *datap)
         break;
       case TK_CMP_LATENT_SUMS:
         tk_compressor_latent_sums_thread(
+          data->C,
           data->C->samples,
           data->C->visibles,
           data->C->alpha,
-          data->C->log_marg,
           data->C->sums,
           data->n_samples,
           data->C->n_visible,
@@ -1255,12 +1297,14 @@ static inline void tk_compressor_init (
   C->log_py = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
   C->px = tk_malloc(L, C->n_visible * sizeof(double));
   C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
-  C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
-  C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
+  C->lm = kh_init(mtx);
+  C->tmp = tk_malloc(L, 2 * 2 * C->n_visible * sizeof(double));
+  C->ps = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
+  C->cnt = kh_init(mtx);
   C->smis = tk_malloc(L, C->n_hidden * C->n_visible * 2 * sizeof(double));
   C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
   C->sumsa = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
-  C->n_threads = n_threads;
+  C->n_threads = 1; //n_threads;
   C->n_threads_done = 0;
   C->stage = TK_CMP_INIT;
   C->threads = tk_malloc(L, C->n_threads * sizeof(pthread_t));
@@ -1304,7 +1348,7 @@ static inline int tk_compressor_persist (lua_State *L)
   tk_lua_fwrite(L, &C->ttc, sizeof(double), 1, fh);
   tk_lua_fwrite(L, C->alpha, sizeof(double), C->n_hidden * C->n_visible, fh);
   tk_lua_fwrite(L, C->log_py, sizeof(double), 2 * C->n_hidden, fh);
-  tk_lua_fwrite(L, C->log_marg, sizeof(double), 2 * 2 * C->n_hidden * C->n_visible, fh);
+  #warning "Write lm to disk"
   tk_lua_fwrite(L, C->sumsa, sizeof(double), 2 * C->n_hidden, fh);
   if (!tostr) {
     tk_lua_fclose(L, fh);
@@ -1373,8 +1417,9 @@ static inline int tk_compressor_load (lua_State *L)
   tk_lua_fread(L, C->alpha, sizeof(double), C->n_hidden * C->n_visible, fh);
   C->log_py = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
   tk_lua_fread(L, C->log_py, sizeof(double), 2 * C->n_hidden, fh);
-  C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
-  tk_lua_fread(L, C->log_marg, sizeof(double), 2 * 2 * C->n_hidden * C->n_visible, fh);
+  C->lm = kh_init(mtx);
+  #warning "Read btree lm from disk"
+  C->tmp = tk_malloc(L, 2 * 2 * C->n_visible * sizeof(double));
   C->sumsa = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
   tk_lua_fread(L, C->sumsa, sizeof(double), 2 * C->n_hidden, fh);
   C->n_threads = n_threads;
