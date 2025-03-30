@@ -620,7 +620,6 @@ static inline void tk_compressor_alpha_thread (
   double *restrict alpha,
   double *restrict baseline,
   double *restrict log_marg,
-  double *restrict counts,
   double *restrict tcs,
   double *restrict mis,
   double *restrict maxmis,
@@ -634,18 +633,11 @@ static inline void tk_compressor_alpha_thread (
   double *restrict baseline1 = baseline + 1 * n_hidden;
   double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine base or splitting at boundary
-    double t = tcs[h];
-    double *restrict mish = mis + h * n_visible;
-    double *restrict ps = counts + h * n_visible;
-    for (unsigned int v = 0; v < n_visible; v ++)
-      ps[v] = exp(t * (mish[v] - maxmis[v]));
-  }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine
     double *restrict alphah = alpha + h * n_visible;
-    double *restrict ps = counts + h * n_visible;
+    double *restrict mish = mis + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++)
-      alphah[v] = (1.0 - lam) * alphah[v] + lam * ps[v];
+      alphah[v] = (1.0 - lam) * alphah[v] + lam * exp(tcs[h] * (mish[v] - maxmis[v]));
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, unsupported outer form
     double s0 = 0.0, s1 = 0.0;
@@ -956,7 +948,6 @@ static void *tk_compressor_worker (void *datap)
           data->C->alpha,
           data->C->baseline,
           data->C->log_marg,
-          data->C->counts,
           data->C->tcs,
           data->C->mis,
           data->C->maxmis,
