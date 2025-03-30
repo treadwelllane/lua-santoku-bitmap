@@ -14,6 +14,8 @@ local env = {
   },
 
   test = {
+    cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
+    ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
     dependencies = {
       "santoku-fs == 0.0.34-1",
       "luacov == 0.15.0-1",
