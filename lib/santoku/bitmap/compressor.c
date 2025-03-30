@@ -837,7 +837,7 @@ static inline void tk_compressor_data_stats (
     float entropy = 0;
     entropy -= px[v] * logf(px[v]);
     entropy -= (1 - px[v]) * logf(1 - px[v]);
-    entropy_x[v] = entropy > 0 ? entropy : 1e-10;
+    entropy_x[v] = entropy > 0 ? entropy : 1e-6;
   }
 }
 
