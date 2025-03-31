@@ -1250,6 +1250,18 @@ static inline void tk_compressor_init (
   pthread_cond_init(&C->cond_done, NULL);
 }
 
+static inline int tk_compressor_visible (lua_State *L) {
+  tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
+  lua_pushinteger(L, C->n_visible);
+  return 1;
+}
+
+static inline int tk_compressor_hidden (lua_State *L) {
+  tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
+  lua_pushinteger(L, C->n_hidden);
+  return 1;
+}
+
 static inline int tk_compressor_train (lua_State *L) {
   tk_compressor_t *C = peek_compressor(L, lua_upvalueindex(1));
   if (C->trained)
@@ -1305,6 +1317,8 @@ static inline int tk_compressor_persist (lua_State *L)
 
 static luaL_Reg mt_fns[] =
 {
+  { "visible", tk_compressor_visible },
+  { "hidden", tk_compressor_hidden },
   { "compress", tk_compressor_compress },
   { "persist", tk_compressor_persist },
   { "train", tk_compressor_train },

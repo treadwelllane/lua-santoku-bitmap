@@ -1,5 +1,12 @@
 # Now
 
+- Consider switching to floats, but avoid NaNs by clamping log probabilities
+  within +/- 50  or 80 (make this a compilation flag)
+- Check errors for various pthread calls
+- Ensure that shrink does as much as possible
+- Can we eliminate one of the *2's for pc and lm? What about log_pyx_unnorm?
+- Can we eliminate the pc buffer entirely?
+
 - if density > 50%, flip bits before/after processing (so indexing works on
   smallest number)
 - fn to get stats, feature rankings, etc
