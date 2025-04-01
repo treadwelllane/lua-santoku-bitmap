@@ -40,6 +40,16 @@ static inline int tk_error (
   return 1;
 }
 
+static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
+{
+  lua_Integer l = luaL_checkinteger(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  if (l > UINT_MAX)
+    luaL_error(L, "value is too large");
+  return (unsigned int) l;
+}
+
 static inline void *tk_malloc (
   lua_State *L,
   size_t s
@@ -370,6 +380,32 @@ static int tk_bitmap_flip (lua_State *L)
   return 0;
 }
 
+static int tk_bitmap_flip_interleave (lua_State *L)
+{
+  lua_settop(L, 3);
+  roaring64_bitmap_t *bm0 = peek(L, 1);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
+  unsigned int step = tk_lua_checkunsigned(L, 3);
+  roaring64_bitmap_t *bm1 = roaring64_bitmap_create();
+  if (bm1 == NULL)
+    luaL_error(L, "memory error creating bitmap");
+  roaring64_bitmap_t **bm1p = (roaring64_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring64_bitmap_t *)); // s, b
+  *bm1p = bm1;
+  luaL_getmetatable(L, MT); // s, b, mt
+  lua_setmetatable(L, -2); // s, b
+  // TODO: is there a faster way to do this with set operations?
+  for (unsigned int i = 0; i < n; i ++)
+    for (unsigned int j = 0; j < step; j ++)
+      if (roaring64_bitmap_contains(bm0, i * step + j))
+        roaring64_bitmap_add(bm1,
+          i * 2 * step + 0 * step + j);
+      else
+        roaring64_bitmap_add(bm1,
+          i * 2 * step + 1 * step + j);
+  return 1;
+}
+
 static luaL_Reg fns[] =
 {
   { "create", tk_bitmap_create },
@@ -390,6 +426,7 @@ static luaL_Reg fns[] =
   { "or", tk_bitmap_or },
   { "xor", tk_bitmap_xor },
   { "flip", tk_bitmap_flip },
+  { "flip_interleave", tk_bitmap_flip_interleave },
   { "extend", tk_bitmap_extend },
   { "bits", tk_bitmap_bits },
   { NULL, NULL }

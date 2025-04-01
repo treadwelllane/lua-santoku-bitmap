@@ -417,6 +417,18 @@ static inline void seed_rand ()
 
 static inline int tk_compressor_compress (lua_State *);
 
+static inline void tk_compressor_wait_for_threads (
+  pthread_mutex_t *mutex,
+  pthread_cond_t *cond_done,
+  unsigned int *n_threads_done,
+  unsigned int n_threads
+) {
+  pthread_mutex_lock(mutex);
+  while ((*n_threads_done) < n_threads)
+    pthread_cond_wait(cond_done, mutex);
+  pthread_mutex_unlock(mutex);
+}
+
 static inline void tk_compressor_signal (
   tk_compressor_stage_t stage,
   tk_compressor_stage_t *stagep,
@@ -431,11 +443,8 @@ static inline void tk_compressor_signal (
   (*n_threads_done) = 0;
   pthread_cond_broadcast(cond_stage);
   pthread_mutex_unlock(mutex);
-  pthread_mutex_lock(mutex);
-  while ((*n_threads_done) < n_threads)
-    pthread_cond_wait(cond_done, mutex);
+  tk_compressor_wait_for_threads(mutex, cond_done, n_threads_done, n_threads);
   pthread_cond_broadcast(cond_stage);
-  pthread_mutex_unlock(mutex);
 }
 
 static inline void tk_compressor_marginals_thread (
@@ -883,6 +892,11 @@ static void *tk_compressor_worker (void *datap)
   seed_rand();
   tk_compressor_thread_data_t *data =
     (tk_compressor_thread_data_t *) datap;
+  pthread_mutex_lock(&data->C->mutex);
+  data->C->n_threads_done ++;
+  if (data->C->n_threads_done == data->C->n_threads)
+    pthread_cond_signal(&data->C->cond_done);
+  pthread_mutex_unlock(&data->C->mutex);
   while (1) {
     pthread_mutex_lock(&data->C->mutex);
     while (data->stage == data->C->stage)
@@ -1070,6 +1084,11 @@ static inline void tk_compressor_setup_threads (
       tk_error(L, "pthread_create", errno);
   }
   C->created_threads = true;
+  tk_compressor_wait_for_threads(
+    &C->mutex,
+    &C->cond_done,
+    &C->n_threads_done,
+    C->n_threads);
 }
 
 static inline int tk_compressor_compress (lua_State *L)
