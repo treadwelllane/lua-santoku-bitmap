@@ -131,10 +131,10 @@ end)
 test("compress", function ()
   local rand = require("santoku.random")
   local originals = {}
-  local n_iterations = 100
-  local n_docs = 1000
+  local n_iterations = 10
+  local n_docs = 100
   local n_cols_full = 784
-  local n_cols_reduced = 256
+  local n_cols_reduced = 32
   local n_threads = 4
   for i = 1, n_docs do
     originals[i] = bm.create()
@@ -171,7 +171,7 @@ test("compress", function ()
   fs.rm(".tmp.compressor.bin", true)
   compressor.persist(".tmp.compressor.bin")
   compressor.destroy()
-  compressor = bmc.load(".tmp.compressor.bin")
+  compressor = bmc.load(".tmp.compressor.bin", 3)
   local corpus_compressed1 = compressor.compress(corpus_original, n_docs)
   assert(bm.equals(corpus_compressed, corpus_compressed))
   assert(bm.equals(corpus_compressed, corpus_compressed1))

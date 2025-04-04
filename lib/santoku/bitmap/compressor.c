@@ -1039,34 +1039,38 @@ static inline void tk_compressor_setup_threads (
   unsigned int cardinality,
   unsigned int n_samples
 ) {
-  unsigned int hslice = C->n_hidden / C->n_threads;
-  unsigned int hremaining = C->n_hidden % C->n_threads;
-  unsigned int hfirst = 0;
-  unsigned int vslice = C->n_visible / C->n_threads;
-  unsigned int vremaining = C->n_visible % C->n_threads;
-  unsigned int vfirst = 0;
+  if (!C->created_threads) {
+    unsigned int hslice = C->n_hidden / C->n_threads;
+    unsigned int hremaining = C->n_hidden % C->n_threads;
+    unsigned int hfirst = 0;
+    unsigned int vslice = C->n_visible / C->n_threads;
+    unsigned int vremaining = C->n_visible % C->n_threads;
+    unsigned int vfirst = 0;
+    for (unsigned int i = 0; i < C->n_threads; i ++) {
+      C->thread_data[i].C = C;
+      C->thread_data[i].stage = TK_CMP_INIT;
+      C->thread_data[i].hfirst = hfirst;
+      C->thread_data[i].hlast = hfirst + hslice - 1;
+      if (hremaining) {
+        C->thread_data[i].hlast ++;
+        hremaining --;
+      }
+      hfirst = C->thread_data[i].hlast + 1;
+      C->thread_data[i].vfirst = vfirst;
+      C->thread_data[i].vlast = vfirst + vslice - 1;
+      if (vremaining) {
+        C->thread_data[i].vlast ++;
+        vremaining --;
+      }
+      vfirst = C->thread_data[i].vlast + 1;
+    }
+  }
   unsigned int bslice = cardinality / C->n_threads;
   unsigned int bremaining = cardinality % C->n_threads;
   unsigned int bfirst = 0;
   for (unsigned int i = 0; i < C->n_threads; i ++) {
-    C->thread_data[i].C = C;
     C->thread_data[i].cardinality = cardinality;
     C->thread_data[i].n_samples = n_samples;
-    C->thread_data[i].stage = TK_CMP_INIT;
-    C->thread_data[i].hfirst = hfirst;
-    C->thread_data[i].hlast = hfirst + hslice - 1;
-    if (hremaining) {
-      C->thread_data[i].hlast ++;
-      hremaining --;
-    }
-    hfirst = C->thread_data[i].hlast + 1;
-    C->thread_data[i].vfirst = vfirst;
-    C->thread_data[i].vlast = vfirst + vslice - 1;
-    if (vremaining) {
-      C->thread_data[i].vlast ++;
-      vremaining --;
-    }
-    vfirst = C->thread_data[i].vlast + 1;
     C->thread_data[i].bfirst = bfirst;
     C->thread_data[i].blast = bfirst + bslice - 1;
     if (bremaining) {
@@ -1079,16 +1083,18 @@ static inline void tk_compressor_setup_threads (
     if (C->thread_data[i].blast >= cardinality)
       C->thread_data[i].blast = cardinality - 1;
     bfirst = C->thread_data[i].blast + 1;
-    // TODO: ensure everything gets freed on error (should be in compressor gc)
-    if (!C->created_threads && pthread_create(&C->threads[i], NULL, tk_compressor_worker, &C->thread_data[i]) != 0)
-      tk_error(L, "pthread_create", errno);
   }
-  C->created_threads = true;
-  tk_compressor_wait_for_threads(
-    &C->mutex,
-    &C->cond_done,
-    &C->n_threads_done,
-    C->n_threads);
+  if (!C->created_threads) {
+    for (unsigned int i = 0; i < C->n_threads; i ++)
+      if (pthread_create(&C->threads[i], NULL, tk_compressor_worker, &C->thread_data[i]) != 0)
+        tk_error(L, "pthread_create", errno);
+    tk_compressor_wait_for_threads(
+      &C->mutex,
+      &C->cond_done,
+      &C->n_threads_done,
+      C->n_threads);
+    C->created_threads = true;
+  }
 }
 
 static inline int tk_compressor_compress (lua_State *L)
@@ -1267,6 +1273,7 @@ static inline void tk_compressor_init (
   pthread_mutex_init(&C->mutex, NULL);
   pthread_cond_init(&C->cond_stage, NULL);
   pthread_cond_init(&C->cond_done, NULL);
+  tk_compressor_setup_threads(L, C, 0, 0);
 }
 
 static inline int tk_compressor_visible (lua_State *L) {
@@ -1398,6 +1405,7 @@ static inline int tk_compressor_load (lua_State *L)
   pthread_mutex_init(&C->mutex, NULL);
   pthread_cond_init(&C->cond_stage, NULL);
   pthread_cond_init(&C->cond_done, NULL);
+  tk_compressor_setup_threads(L, C, 0, 0);
   return 1;
 }
 
