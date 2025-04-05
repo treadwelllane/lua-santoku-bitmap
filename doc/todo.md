@@ -1,6 +1,6 @@
 # Now
 
-- maxmis still causing RMA. Change access or thread local reduce?
+- Still room for performance improvement (see perf -g & numatop)
 
 - Consider switching to floats, but avoid NaNs by clamping log probabilities
   within +/- 50  or 80 (make this a compilation flag)
