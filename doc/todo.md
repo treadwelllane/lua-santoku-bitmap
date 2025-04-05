@@ -1,5 +1,9 @@
 # Now
 
+- Fix load/restore with diff # of threads
+
+# Later
+
 - Still room for performance improvement (see perf -g & numatop)
 
 - Consider switching to floats, but avoid NaNs by clamping log probabilities
