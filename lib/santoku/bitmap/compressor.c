@@ -512,10 +512,11 @@ static inline void tk_compressor_marginals_thread (
       tmp00[v] = 0;
       tmp01[v] = 0;
     }
+    double *restrict py0h = pyx + h * n_samples;
     for (uint64_t c = 0; c < cardinality; c ++) { // not vectorzed, gather scatter
       uint64_t s = samples[c];
       unsigned int v = visibles[c];
-      double py0 = pyx[h * n_samples + s];
+      double py0 = py0h[s];
       double py1 = 1 - py0;
       tmp10[v] += py0;
       tmp11[v] += py1;
@@ -695,8 +696,9 @@ static inline void tk_compressor_latent_sums_thread (
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden,
-  unsigned int bfirst,
-  unsigned int blast
+  unsigned int hfirst,
+  unsigned int hlast,
+  unsigned int cardinality
 ) {
   double *restrict sums0 = sums + 0 * n_hidden * n_samples;
   double *restrict sums1 = sums + 1 * n_hidden * n_samples;
@@ -704,19 +706,19 @@ static inline void tk_compressor_latent_sums_thread (
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
   double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
   double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
-  for (unsigned int b = bfirst; b <= blast; b ++) {
-    uint64_t s = samples[b];
-    unsigned int v = visibles[b];
-    for (unsigned int h = 0; h < n_hidden; h ++) { // not vectorized, gather/scatter
-      double *restrict sums0h = sums0 + h * n_samples;
-      double *restrict sums1h = sums1 + h * n_samples;
-      double *restrict lm00a = lm00 + h * n_visible;
-      double *restrict lm01a = lm01 + h * n_visible;
-      double *restrict lm10a = lm10 + h * n_visible;
-      double *restrict lm11a = lm11 + h * n_visible;
-      double *restrict aph = alpha + h * n_visible;
-      sums0h[s] = sums0h[s] - aph[v] * lm00a[v] + aph[v] * lm10a[v]; // gather/scatter
-      sums1h[s] = sums1h[s] - aph[v] * lm01a[v] + aph[v] * lm11a[v]; // gather/scatter
+  for (unsigned int h = hfirst; h <= hlast; h++) {
+    double *restrict sums0h = sums0 + h * n_samples;
+    double *restrict sums1h = sums1 + h * n_samples;
+    double *restrict lm00a = lm00 + h * n_visible;
+    double *restrict lm01a = lm01 + h * n_visible;
+    double *restrict lm10a = lm10 + h * n_visible;
+    double *restrict lm11a = lm11 + h * n_visible;
+    double *restrict aph   = alpha + h * n_visible;
+    for (unsigned int b = 0; b < cardinality; b++) {
+      uint64_t s = samples[b];
+      unsigned int v = visibles[b];
+      sums0h[s] = sums0h[s] - aph[v] * lm00a[v] + aph[v] * lm10a[v];
+      sums1h[s] = sums1h[s] - aph[v] * lm01a[v] + aph[v] * lm11a[v];
     }
   }
 }
@@ -990,8 +992,9 @@ static void *tk_compressor_worker (void *datap)
           data->n_samples,
           data->C->n_visible,
           data->C->n_hidden,
-          data->bfirst,
-          data->blast);
+          data->hfirst,
+          data->hlast,
+          data->cardinality);
         break;
       case TK_CMP_LATENT_PY:
         tk_compressor_latent_py_thread(

@@ -1,5 +1,7 @@
 # Now
 
+- maxmis still causing RMA. Change access or thread local reduce?
+
 - Consider switching to floats, but avoid NaNs by clamping log probabilities
   within +/- 50  or 80 (make this a compilation flag)
 - Check errors for various pthread calls
