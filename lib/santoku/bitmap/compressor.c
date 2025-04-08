@@ -904,10 +904,9 @@ static void tk_compressor_tile_pairs (
   lua_State *L,
   tk_compressor_sort_t *pairs,
   size_t n_pairs,
-  uint64_t max_s,
   unsigned int max_v
 ) {
-  size_t num_s_tiles = (max_s / S_BLOCK) + 1;
+  size_t num_s_tiles = ((n_pairs - 1) / S_BLOCK) + 1;
   size_t num_v_tiles = (max_v / V_BLOCK) + 1;
   size_t total_tiles = num_s_tiles * num_v_tiles;
   tk_compressor_tile_t *tiles = tk_malloc(L, total_tiles * sizeof(tk_compressor_tile_t));
@@ -955,23 +954,19 @@ static inline void tk_compressor_setup_bits (
   tk_compressor_sort_t *pairs,
   uint64_t *samples,
   unsigned int *visibles,
-  unsigned int n_visible
+  unsigned int n_visible,
+  bool tile
 ) {
   tk_compressor_setup_bits_t state;
   state.pairs = pairs;
   state.n = 0;
   state.n_visible = n_visible;
   roaring64_bitmap_iterate(bm, tk_compressor_setup_bits_iter, &state);
-  size_t n_pairs = state.n;
-  qsort(pairs, n_pairs, sizeof(tk_compressor_sort_t), tk_compressor_cmp_sort);
-  uint64_t max_s = 0;
-  unsigned int max_v = 0;
-  for (size_t i = 0; i < n_pairs; i++) {
-    if (pairs[i].s > max_s) max_s = pairs[i].s;
-    if (pairs[i].v > max_v) max_v = pairs[i].v;
-  }
-  tk_compressor_tile_pairs(L, pairs, n_pairs, max_s, max_v);
-  for (size_t i = 0; i < n_pairs; i++) {
+  if (!tile)
+    qsort(pairs, state.n, sizeof(tk_compressor_sort_t), tk_compressor_cmp_sort);
+  else
+    tk_compressor_tile_pairs(L, pairs, state.n, roaring64_bitmap_maximum(bm));
+  for (size_t i = 0; i < state.n; i++) {
     samples[i]  = pairs[i].s;
     visibles[i] = pairs[i].v;
   }
@@ -1329,7 +1324,7 @@ static inline int tk_compressor_compress (lua_State *L)
   C->sort = tk_realloc(L, C->sort, cardinality * sizeof(tk_compressor_sort_t));
   C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, cardinality * sizeof(uint64_t), false);
   C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, cardinality * sizeof(unsigned int), false);
-  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible);
+  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible, false);
   unsigned int n_samples = tk_lua_optunsigned(L, 2, 1);
   tk_compressor_setup_threads(L, C, cardinality, n_samples);
   C->mis = tk_realloc(L, C->mis, C->n_hidden * n_samples * sizeof(double));
@@ -1379,7 +1374,7 @@ static inline void _tk_compressor_train (
   C->sort = tk_malloc(L, cardinality * sizeof(tk_compressor_sort_t));
   C->samples = tk_malloc_interleaved(L, &C->samples_len, cardinality * sizeof(uint64_t));
   C->visibles = tk_malloc_interleaved(L, &C->visibles_len, cardinality * sizeof(unsigned int));
-  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible);
+  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible, true);
   tk_compressor_data_stats(
     cardinality,
     C->visibles,
