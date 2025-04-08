@@ -1,14 +1,17 @@
+#define _GNU_SOURCE
 #include "lua.h"
 #include "lauxlib.h"
 #include "roaring.h"
 #include "roaring.c"
-#include <string.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <errno.h>
-#include <math.h>
-#include <time.h>
 #include <float.h>
+#include <math.h>
+#include <numa.h>
+#include <pthread.h>
+#include <sched.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #define MT_BITMAP "santoku_bitmap"
 #define MT_COMPRESSOR "santoku_bitmap_compressor"
@@ -21,6 +24,7 @@ typedef enum {
   TK_CMP_MARGINALS,
   TK_CMP_MAXMIS,
   TK_CMP_ALPHA,
+  TK_CMP_LATENT_ALL,
   TK_CMP_LATENT_BASELINE,
   TK_CMP_LATENT_SUMS,
   TK_CMP_LATENT_PY,
@@ -41,9 +45,14 @@ typedef struct {
   unsigned int hlast;
   unsigned int vfirst;
   unsigned int vlast;
-  unsigned int bfirst;
-  unsigned int blast;
+  unsigned int index;
+  unsigned int sigid;
 } tk_compressor_thread_data_t;
+
+typedef struct {
+  uint64_t s;
+  unsigned int v;
+} tk_compressor_sort_t;
 
 typedef struct tk_compressor_s {
   bool trained; // already trained
@@ -52,13 +61,19 @@ typedef struct tk_compressor_s {
   double *log_marg;
   double *log_py;
   double *log_pyx_unnorm;
+  size_t maxmis_len;
   double *maxmis;
   double *mis;
   double *sums;
   double *baseline;
+  tk_compressor_sort_t *sort;
+  size_t samples_len;
   uint64_t *samples;
+  size_t visibles_len;
   unsigned int *visibles;
+  size_t px_len;
   double *px;
+  size_t entropy_len;
   double *entropy_x;
   double *pyx;
   double *counts;
@@ -78,6 +93,7 @@ typedef struct tk_compressor_s {
   pthread_t *threads;
   tk_compressor_thread_data_t *thread_data;
   bool created_threads;
+  unsigned int sigid;
 } tk_compressor_t;
 
 static inline void tk_lua_callmod (
@@ -288,6 +304,43 @@ static inline int tk_error (
   return 1;
 }
 
+static inline void *tk_malloc_interleaved (
+  lua_State *L,
+  size_t *sp,
+  size_t s
+) {
+  void *p = numa_available() == -1 ? malloc(s) : numa_alloc_interleaved(s);
+  if (!p) {
+    tk_error(L, "malloc failed", ENOMEM);
+    return NULL;
+  } else {
+    *sp = s;
+    return p;
+  }
+}
+
+static inline void *tk_ensure_interleaved (
+  lua_State *L,
+  size_t *s1p,
+  void *p0,
+  size_t s1,
+  bool copy
+) {
+  size_t s0 = *s1p;
+  if (s1 <= s0)
+    return p0;
+  void *p1 = tk_malloc_interleaved(L, s1p, s1);
+  if (!p1) {
+    tk_error(L, "realloc failed", ENOMEM);
+    return NULL;
+  } else {
+    if (copy)
+      memcpy(p1, p0, s0);
+    numa_free(p0, s0);
+    return p1;
+  }
+}
+
 static inline void *tk_malloc (
   lua_State *L,
   size_t s
@@ -343,13 +396,51 @@ static tk_compressor_t *peek_compressor (lua_State *L, int i)
 
 static inline void tk_compressor_shrink (tk_compressor_t *C)
 {
-  free(C->maxmis); C->maxmis = NULL;
   free(C->mis); C->mis = NULL;
   free(C->sums); C->sums = NULL;
-  free(C->px); C->px = NULL;
-  free(C->entropy_x); C->entropy_x = NULL;
   free(C->counts); C->counts = NULL;
   free(C->tcs); C->tcs = NULL;
+  if (numa_available() == -1) {
+    free(C->maxmis); C->maxmis = NULL;
+    free(C->px); C->px = NULL;
+    free(C->entropy_x); C->entropy_x = NULL;
+  } else {
+    numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL;
+    numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL;
+    numa_free(C->px, C->px_len); C->px = NULL;
+  }
+}
+
+static inline void tk_compressor_wait_for_threads (
+  pthread_mutex_t *mutex,
+  pthread_cond_t *cond_done,
+  unsigned int *n_threads_done,
+  unsigned int n_threads
+) {
+  pthread_mutex_lock(mutex);
+  while ((*n_threads_done) < n_threads)
+    pthread_cond_wait(cond_done, mutex);
+  pthread_mutex_unlock(mutex);
+}
+
+static inline void tk_compressor_signal (
+  tk_compressor_stage_t stage,
+  unsigned int *sigid,
+  tk_compressor_stage_t *stagep,
+  pthread_mutex_t *mutex,
+  pthread_cond_t *cond_stage,
+  pthread_cond_t *cond_done,
+  unsigned int *n_threads_done,
+  unsigned int n_threads
+) {
+  pthread_mutex_lock(mutex);
+  (*sigid) ++;
+  (*stagep) = stage;
+  (*n_threads_done) = 0;
+  pthread_cond_broadcast(cond_stage);
+  pthread_mutex_unlock(mutex);
+  tk_compressor_wait_for_threads(mutex, cond_done, n_threads_done, n_threads);
+  pthread_cond_broadcast(cond_stage);
 }
 
 static int tk_compressor_gc (lua_State *L)
@@ -366,12 +457,18 @@ static int tk_compressor_gc (lua_State *L)
   free(C->log_pyx_unnorm); C->log_pyx_unnorm = NULL;
   free(C->pyx); C->pyx = NULL;
   free(C->baseline); C->baseline = NULL;
-  free(C->samples); C->samples = NULL;
-  free(C->visibles); C->visibles = NULL;
-  pthread_mutex_lock(&C->mutex);
-  C->stage = TK_CMP_DONE;
-  pthread_cond_broadcast(&C->cond_stage);
-  pthread_mutex_unlock(&C->mutex);
+  free(C->sort); C->sort = NULL;
+  if (numa_available() == -1) {
+    free(C->samples); C->samples = NULL;
+    free(C->visibles); C->visibles = NULL;
+  } else {
+    numa_free(C->samples, C->samples_len); C->samples = NULL;
+    numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+  }
+  tk_compressor_signal(
+    TK_CMP_DONE, &C->sigid,
+    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
+    &C->n_threads_done, C->n_threads);
   // TODO: What is the right way to deal with potential thread errors (or other
   // errors, for that matter) during the finalizer?
   if (C->created_threads)
@@ -416,36 +513,6 @@ static inline void seed_rand ()
 }
 
 static inline int tk_compressor_compress (lua_State *);
-
-static inline void tk_compressor_wait_for_threads (
-  pthread_mutex_t *mutex,
-  pthread_cond_t *cond_done,
-  unsigned int *n_threads_done,
-  unsigned int n_threads
-) {
-  pthread_mutex_lock(mutex);
-  while ((*n_threads_done) < n_threads)
-    pthread_cond_wait(cond_done, mutex);
-  pthread_mutex_unlock(mutex);
-}
-
-static inline void tk_compressor_signal (
-  tk_compressor_stage_t stage,
-  tk_compressor_stage_t *stagep,
-  pthread_mutex_t *mutex,
-  pthread_cond_t *cond_stage,
-  pthread_cond_t *cond_done,
-  unsigned int *n_threads_done,
-  unsigned int n_threads
-) {
-  pthread_mutex_lock(mutex);
-  (*stagep) = stage;
-  (*n_threads_done) = 0;
-  pthread_cond_broadcast(cond_stage);
-  pthread_mutex_unlock(mutex);
-  tk_compressor_wait_for_threads(mutex, cond_done, n_threads_done, n_threads);
-  pthread_cond_broadcast(cond_stage);
-}
 
 static inline void tk_compressor_marginals_thread (
   uint64_t cardinality,
@@ -798,35 +865,116 @@ static inline void tk_compressor_update_last_tc (
   *last_tc = sum0;
 }
 
+static int tk_compressor_cmp_sort (const void *ap, const void *bp)
+{
+  const tk_compressor_sort_t *a = (const tk_compressor_sort_t *)ap;
+  const tk_compressor_sort_t *b = (const tk_compressor_sort_t *)bp;
+  if (a->v < b->v) return -1;
+  if (a->v > b->v) return  1;
+  if (a->s < b->s) return -1;
+  if (a->s > b->s) return  1;
+  return 0;
+}
+
+// TODO: Consider making this configurable
+#define S_BLOCK 1024
+#define V_BLOCK 2048
+
 typedef struct {
-  uint64_t *samples;
-  unsigned int *visibles;
+  tk_compressor_sort_t *pairs;
+  size_t capacity;
+  size_t size;
+} tk_compressor_tile_t;
+
+static void tk_compressor_tile_push (
+  lua_State *L,
+  tk_compressor_tile_t *tile,
+  tk_compressor_sort_t pair
+) {
+  if (tile->size >= tile->capacity) {
+    size_t newcap = (tile->capacity == 0) ? 1024 : (tile->capacity * 2);
+    tk_compressor_sort_t *newtile = tk_realloc(L, tile->pairs, newcap * sizeof(tk_compressor_sort_t));
+    tile->pairs = newtile;
+    tile->capacity = newcap;
+  }
+  tile->pairs[tile->size ++] = pair;
+}
+
+static void tk_compressor_tile_pairs (
+  lua_State *L,
+  tk_compressor_sort_t *pairs,
+  size_t n_pairs,
+  uint64_t max_s,
+  unsigned int max_v
+) {
+  size_t num_s_tiles = (max_s / S_BLOCK) + 1;
+  size_t num_v_tiles = (max_v / V_BLOCK) + 1;
+  size_t total_tiles = num_s_tiles * num_v_tiles;
+  tk_compressor_tile_t *tiles = tk_malloc(L, total_tiles * sizeof(tk_compressor_tile_t));
+  memset(tiles, 0, sizeof(tk_compressor_tile_t) * total_tiles);
+  for (size_t i = 0; i < n_pairs; i ++) {
+    uint64_t s = pairs[i].s;
+    unsigned int v = pairs[i].v;
+    size_t tile_s = (size_t)(s / S_BLOCK);
+    size_t tile_v = (size_t)(v / V_BLOCK);
+    size_t tile_index = tile_s * num_v_tiles + tile_v;
+    tk_compressor_tile_push(L, &tiles[tile_index], pairs[i]);
+  }
+  size_t out_idx = 0;
+  for (size_t t = 0; t < total_tiles; t ++) {
+    tk_compressor_tile_t *tile = &tiles[t];
+    qsort(tile->pairs, tile->size, sizeof(tk_compressor_sort_t), tk_compressor_cmp_sort);
+    for (size_t j = 0; j < tile->size; j ++) {
+      pairs[out_idx ++] = tile->pairs[j];
+    }
+    free(tile->pairs);
+  }
+  free(tiles);
+}
+
+typedef struct {
+  tk_compressor_sort_t *pairs;
   uint64_t n;
   unsigned int n_visible;
 } tk_compressor_setup_bits_t;
 
 static bool tk_compressor_setup_bits_iter (uint64_t val, void *statepv)
 {
-  tk_compressor_setup_bits_t *statep =
-    (tk_compressor_setup_bits_t *) statepv;
-  statep->samples[statep->n] = val / statep->n_visible;
-  statep->visibles[statep->n] = val % statep->n_visible;
-  statep->n ++;
+  tk_compressor_setup_bits_t *statep = (tk_compressor_setup_bits_t *) statepv;
+  statep->pairs[statep->n] = (tk_compressor_sort_t) {
+    .s = val / statep->n_visible,
+    .v = (unsigned int)(val % statep->n_visible)
+  };
+  statep->n++;
   return true;
 }
 
 static inline void tk_compressor_setup_bits (
+  lua_State *L,
   roaring64_bitmap_t *bm,
+  tk_compressor_sort_t *pairs,
   uint64_t *samples,
   unsigned int *visibles,
   unsigned int n_visible
 ) {
   tk_compressor_setup_bits_t state;
-  state.samples = samples;
-  state.visibles = visibles;
+  state.pairs = pairs;
   state.n = 0;
   state.n_visible = n_visible;
   roaring64_bitmap_iterate(bm, tk_compressor_setup_bits_iter, &state);
+  size_t n_pairs = state.n;
+  qsort(pairs, n_pairs, sizeof(tk_compressor_sort_t), tk_compressor_cmp_sort);
+  uint64_t max_s = 0;
+  unsigned int max_v = 0;
+  for (size_t i = 0; i < n_pairs; i++) {
+    if (pairs[i].s > max_s) max_s = pairs[i].s;
+    if (pairs[i].v > max_v) max_v = pairs[i].v;
+  }
+  tk_compressor_tile_pairs(L, pairs, n_pairs, max_s, max_v);
+  for (size_t i = 0; i < n_pairs; i++) {
+    samples[i]  = pairs[i].s;
+    visibles[i] = pairs[i].v;
+  }
 }
 
 // Does this make sense to parallize? I don't think so...
@@ -901,13 +1049,12 @@ static void *tk_compressor_worker (void *datap)
   pthread_mutex_unlock(&data->C->mutex);
   while (1) {
     pthread_mutex_lock(&data->C->mutex);
-    while (data->stage == data->C->stage)
+    while (data->sigid == data->C->sigid)
       pthread_cond_wait(&data->C->cond_stage, &data->C->mutex);
-    data->stage = data->C->stage;
+    data->sigid = data->C->sigid;
+    tk_compressor_stage_t stage = data->C->stage;
     pthread_mutex_unlock(&data->C->mutex);
-    if (data->stage == TK_CMP_DONE)
-      break;
-    switch (data->stage) {
+    switch (stage) {
       case TK_CMP_INIT_ALPHA:
         tk_compressor_init_alpha_thread(
           data->C->alpha,
@@ -973,6 +1120,43 @@ static void *tk_compressor_worker (void *datap)
           data->hfirst,
           data->hlast);
         break;
+      case TK_CMP_LATENT_ALL:
+        tk_compressor_latent_baseline_thread(
+          data->C->sums,
+          data->C->baseline,
+          data->n_samples,
+          data->C->n_hidden,
+          data->hfirst,
+          data->hlast);
+        tk_compressor_latent_sums_thread(
+          data->C->samples,
+          data->C->visibles,
+          data->C->alpha,
+          data->C->log_marg,
+          data->C->sums,
+          data->n_samples,
+          data->C->n_visible,
+          data->C->n_hidden,
+          data->hfirst,
+          data->hlast,
+          data->cardinality);
+        tk_compressor_latent_py_thread(
+          data->C->log_py,
+          data->C->log_pyx_unnorm,
+          data->C->sums,
+          data->n_samples,
+          data->C->n_hidden,
+          data->hfirst,
+          data->hlast);
+        tk_compressor_latent_norm_thread(
+          data->C->mis,
+          data->C->pyx,
+          data->C->log_pyx_unnorm,
+          data->n_samples,
+          data->C->n_hidden,
+          data->hfirst,
+          data->hlast);
+        break;
       case TK_CMP_LATENT_BASELINE:
         tk_compressor_latent_baseline_thread(
           data->C->sums,
@@ -1024,6 +1208,8 @@ static void *tk_compressor_worker (void *datap)
           data->hfirst,
           data->hlast);
         break;
+      case TK_CMP_DONE:
+        break;
       default:
         assert(false);
     }
@@ -1032,8 +1218,54 @@ static void *tk_compressor_worker (void *datap)
     if (data->C->n_threads_done == data->C->n_threads)
       pthread_cond_signal(&data->C->cond_done);
     pthread_mutex_unlock(&data->C->mutex);
+    if (stage == TK_CMP_DONE)
+      break;
   }
   return NULL;
+}
+
+static inline void tk_pin_thread_to_cpu (
+    unsigned int thread_index,
+    unsigned int n_threads
+) {
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  unsigned int n_nodes = numa_max_node() + 1;
+  unsigned int threads_per_node = n_threads / n_nodes;
+  unsigned int node = thread_index / threads_per_node;
+  if (node >= n_nodes) node = n_nodes - 1;
+  struct bitmask *cpus = numa_allocate_cpumask();
+  if (numa_node_to_cpus(node, cpus) == 0) {
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < cpus->size; ++i) {
+      if (numa_bitmask_isbitset(cpus, i)) {
+        count++;
+      }
+    }
+    if (count > 0) {
+      unsigned int local_index =
+        (thread_index - node * threads_per_node) % count;
+      unsigned int found = 0;
+      for (unsigned int i = 0; i < cpus->size; ++i) {
+        if (numa_bitmask_isbitset(cpus, i)) {
+          if (found == local_index) {
+            CPU_SET(i, &cpuset);
+            break;
+          }
+          found++;
+        }
+      }
+    }
+  }
+  numa_free_cpumask(cpus);
+  pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+}
+
+static void *tk_compressor_worker_wrapper(void *arg) {
+  tk_compressor_thread_data_t *td = (tk_compressor_thread_data_t *)arg;
+  if (numa_available() != -1 && numa_max_node() > 0)
+    tk_pin_thread_to_cpu(td->index, td->C->n_threads);
+  return tk_compressor_worker(arg);
 }
 
 static inline void tk_compressor_setup_threads (
@@ -1043,6 +1275,7 @@ static inline void tk_compressor_setup_threads (
   unsigned int n_samples
 ) {
   if (!C->created_threads) {
+    C->sigid = 0;
     unsigned int hslice = C->n_hidden / C->n_threads;
     unsigned int hremaining = C->n_hidden % C->n_threads;
     unsigned int hfirst = 0;
@@ -1051,6 +1284,8 @@ static inline void tk_compressor_setup_threads (
     unsigned int vfirst = 0;
     for (unsigned int i = 0; i < C->n_threads; i ++) {
       C->thread_data[i].C = C;
+      C->thread_data[i].sigid = 0;
+      C->thread_data[i].index = i;
       C->thread_data[i].stage = TK_CMP_INIT;
       C->thread_data[i].hfirst = hfirst;
       C->thread_data[i].hlast = hfirst + hslice - 1;
@@ -1068,28 +1303,13 @@ static inline void tk_compressor_setup_threads (
       vfirst = C->thread_data[i].vlast + 1;
     }
   }
-  unsigned int bslice = cardinality / C->n_threads;
-  unsigned int bremaining = cardinality % C->n_threads;
-  unsigned int bfirst = 0;
   for (unsigned int i = 0; i < C->n_threads; i ++) {
     C->thread_data[i].cardinality = cardinality;
     C->thread_data[i].n_samples = n_samples;
-    C->thread_data[i].bfirst = bfirst;
-    C->thread_data[i].blast = bfirst + bslice - 1;
-    if (bremaining) {
-      C->thread_data[i].blast ++;
-      bremaining --;
-    }
-    while (C->thread_data[i].blast + 1 < cardinality &&
-      C->samples[C->thread_data[i].blast + 1] == C->samples[C->thread_data[i].blast])
-      C->thread_data[i].blast ++;
-    if (C->thread_data[i].blast >= cardinality)
-      C->thread_data[i].blast = cardinality - 1;
-    bfirst = C->thread_data[i].blast + 1;
   }
   if (!C->created_threads) {
     for (unsigned int i = 0; i < C->n_threads; i ++)
-      if (pthread_create(&C->threads[i], NULL, tk_compressor_worker, &C->thread_data[i]) != 0)
+      if (pthread_create(&C->threads[i], NULL, tk_compressor_worker_wrapper, &C->thread_data[i]) != 0)
         tk_error(L, "pthread_create", errno);
     tk_compressor_wait_for_threads(
       &C->mutex,
@@ -1106,9 +1326,10 @@ static inline int tk_compressor_compress (lua_State *L)
   roaring64_bitmap_t *bm = peek_bitmap(L, 1);
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
-  C->samples = tk_realloc(L, C->samples, cardinality * sizeof(uint64_t));
-  C->visibles = tk_realloc(L, C->visibles, cardinality * sizeof(unsigned int));
-  tk_compressor_setup_bits(bm, C->samples, C->visibles, C->n_visible);
+  C->sort = tk_realloc(L, C->sort, cardinality * sizeof(tk_compressor_sort_t));
+  C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, cardinality * sizeof(uint64_t), false);
+  C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, cardinality * sizeof(unsigned int), false);
+  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible);
   unsigned int n_samples = tk_lua_optunsigned(L, 2, 1);
   tk_compressor_setup_threads(L, C, cardinality, n_samples);
   C->mis = tk_realloc(L, C->mis, C->n_hidden * n_samples * sizeof(double));
@@ -1117,19 +1338,7 @@ static inline int tk_compressor_compress (lua_State *L)
   unsigned int len_sums = (2 * C->n_hidden * (n_samples > C->n_visible ? n_samples : C->n_visible));
   C->sums = tk_realloc(L, C->sums, len_sums * sizeof(double));
   tk_compressor_signal(
-    TK_CMP_LATENT_BASELINE,
-    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-    &C->n_threads_done, C->n_threads);
-  tk_compressor_signal(
-    TK_CMP_LATENT_SUMS,
-    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-    &C->n_threads_done, C->n_threads);
-  tk_compressor_signal(
-    TK_CMP_LATENT_PY,
-    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-    &C->n_threads_done, C->n_threads);
-  tk_compressor_signal(
-    TK_CMP_LATENT_NORM,
+    TK_CMP_LATENT_ALL, &C->sigid,
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
     &C->n_threads_done, C->n_threads);
   roaring64_bitmap_t *bm0 = roaring64_bitmap_create();
@@ -1167,10 +1376,10 @@ static inline void _tk_compressor_train (
     len_mis = C->n_hidden * n_samples;
   C->mis = tk_malloc(L, len_mis * sizeof(double));
   uint64_t cardinality = roaring64_bitmap_get_cardinality(bm);
-  C->samples = tk_malloc(L, cardinality * sizeof(uint64_t));
-  C->visibles = tk_malloc(L, cardinality * sizeof(unsigned int));
-  tk_compressor_setup_bits(bm, C->samples, C->visibles, C->n_visible);
-  tk_compressor_setup_threads(L, C, cardinality, n_samples);
+  C->sort = tk_malloc(L, cardinality * sizeof(tk_compressor_sort_t));
+  C->samples = tk_malloc_interleaved(L, &C->samples_len, cardinality * sizeof(uint64_t));
+  C->visibles = tk_malloc_interleaved(L, &C->visibles_len, cardinality * sizeof(unsigned int));
+  tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible);
   tk_compressor_data_stats(
     cardinality,
     C->visibles,
@@ -1178,53 +1387,34 @@ static inline void _tk_compressor_train (
     C->entropy_x,
     n_samples,
     C->n_visible);
+  tk_compressor_setup_threads(L, C, cardinality, n_samples);
   tk_compressor_signal(
-    TK_CMP_INIT_TCS,
+    TK_CMP_INIT_PYX_UNNORM, &C->sigid,
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
     &C->n_threads_done, C->n_threads);
   tk_compressor_signal(
-    TK_CMP_INIT_ALPHA,
-    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-    &C->n_threads_done, C->n_threads);
-  tk_compressor_signal(
-    TK_CMP_INIT_PYX_UNNORM,
-    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-    &C->n_threads_done, C->n_threads);
-  tk_compressor_signal(
-    TK_CMP_LATENT_NORM,
+    TK_CMP_LATENT_NORM, &C->sigid,
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
     &C->n_threads_done, C->n_threads);
   for (unsigned int i = 0; i < max_iter; i ++) {
     tk_compressor_signal(
-      TK_CMP_MARGINALS,
+      TK_CMP_MARGINALS, &C->sigid,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
     tk_compressor_signal(
-      TK_CMP_MAXMIS,
+      TK_CMP_MAXMIS, &C->sigid,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
     tk_compressor_signal(
-      TK_CMP_ALPHA,
+      TK_CMP_ALPHA, &C->sigid,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
     tk_compressor_signal(
-      TK_CMP_LATENT_BASELINE,
+      TK_CMP_LATENT_ALL, &C->sigid,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
     tk_compressor_signal(
-      TK_CMP_LATENT_SUMS,
-      &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-      &C->n_threads_done, C->n_threads);
-    tk_compressor_signal(
-      TK_CMP_LATENT_PY,
-      &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-      &C->n_threads_done, C->n_threads);
-    tk_compressor_signal(
-      TK_CMP_LATENT_NORM,
-      &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
-      &C->n_threads_done, C->n_threads);
-    tk_compressor_signal(
-      TK_CMP_UPDATE_TC,
+      TK_CMP_UPDATE_TC, &C->sigid,
       &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
       &C->n_threads_done, C->n_threads);
     tk_compressor_update_last_tc(
@@ -1264,9 +1454,9 @@ static inline void tk_compressor_init (
   C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->baseline = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
-  C->px = tk_malloc(L, C->n_visible * sizeof(double));
-  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
-  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
+  C->px = tk_malloc_interleaved(L, &C->px_len, C->n_visible * sizeof(double));
+  C->entropy_x = tk_malloc_interleaved(L, &C->entropy_len, C->n_visible * sizeof(double));
+  C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
   C->n_threads = n_threads;
   C->n_threads_done = 0;
   C->stage = TK_CMP_INIT;
@@ -1277,6 +1467,14 @@ static inline void tk_compressor_init (
   pthread_cond_init(&C->cond_stage, NULL);
   pthread_cond_init(&C->cond_done, NULL);
   tk_compressor_setup_threads(L, C, 0, 0);
+  tk_compressor_signal(
+    TK_CMP_INIT_TCS, &C->sigid,
+    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
+    &C->n_threads_done, C->n_threads);
+  tk_compressor_signal(
+    TK_CMP_INIT_ALPHA, &C->sigid,
+    &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
+    &C->n_threads_done, C->n_threads);
 }
 
 static inline int tk_compressor_visible (lua_State *L) {

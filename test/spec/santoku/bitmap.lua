@@ -131,7 +131,7 @@ end)
 test("compress", function ()
   local rand = require("santoku.random")
   local originals = {}
-  local n_iterations = 20
+  local n_iterations = 10
   local n_docs = 10000
   local n_cols_full = 784 * 4
   local n_cols_reduced = 32 * 4
