@@ -1,7 +1,8 @@
-# Later
+# Now
 
-- Still room for performance improvement (see perf -g & numatop)
-    - Specifically, thread-local allocations for hidden unit subsets should help
+- Potential memory leak when pinning nodes
+
+# Later
 
 - Consider switching to floats, but avoid NaNs by clamping log probabilities
   within +/- 50  or 80 (make this a compilation flag)

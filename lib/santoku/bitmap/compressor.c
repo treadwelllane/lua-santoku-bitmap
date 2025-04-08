@@ -40,7 +40,6 @@ typedef struct {
   tk_compressor_t *C;
   unsigned int cardinality;
   unsigned int n_samples;
-  tk_compressor_stage_t stage;
   unsigned int hfirst;
   unsigned int hlast;
   unsigned int vfirst;
@@ -309,7 +308,7 @@ static inline void *tk_malloc_interleaved (
   size_t *sp,
   size_t s
 ) {
-  void *p = numa_available() == -1 ? malloc(s) : numa_alloc_interleaved(s);
+  void *p = (numa_available() == -1) ? malloc(s) : numa_alloc_interleaved(s);
   if (!p) {
     tk_error(L, "malloc failed", ENOMEM);
     return NULL;
@@ -336,6 +335,7 @@ static inline void *tk_ensure_interleaved (
   } else {
     if (copy)
       memcpy(p1, p0, s0);
+    *s1p = s1;
     numa_free(p0, s0);
     return p1;
   }
@@ -405,9 +405,9 @@ static inline void tk_compressor_shrink (tk_compressor_t *C)
     free(C->px); C->px = NULL;
     free(C->entropy_x); C->entropy_x = NULL;
   } else {
-    numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL;
-    numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL;
-    numa_free(C->px, C->px_len); C->px = NULL;
+    numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL; C->maxmis_len = 0;
+    numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL; C->entropy_len = 0;
+    numa_free(C->px, C->px_len); C->px = NULL; C->px_len = 0;
   }
 }
 
@@ -1220,13 +1220,14 @@ static void *tk_compressor_worker (void *datap)
 }
 
 static inline void tk_pin_thread_to_cpu (
-    unsigned int thread_index,
-    unsigned int n_threads
+  unsigned int thread_index,
+  unsigned int n_threads
 ) {
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   unsigned int n_nodes = numa_max_node() + 1;
   unsigned int threads_per_node = n_threads / n_nodes;
+  if (threads_per_node == 0) threads_per_node = 1;
   unsigned int node = thread_index / threads_per_node;
   if (node >= n_nodes) node = n_nodes - 1;
   struct bitmask *cpus = numa_allocate_cpumask();
@@ -1256,7 +1257,7 @@ static inline void tk_pin_thread_to_cpu (
   pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
 }
 
-static void *tk_compressor_worker_wrapper(void *arg) {
+static void *tk_compressor_worker_wrapper (void *arg) {
   tk_compressor_thread_data_t *td = (tk_compressor_thread_data_t *)arg;
   if (numa_available() != -1 && numa_max_node() > 0)
     tk_pin_thread_to_cpu(td->index, td->C->n_threads);
@@ -1281,7 +1282,6 @@ static inline void tk_compressor_setup_threads (
       C->thread_data[i].C = C;
       C->thread_data[i].sigid = 0;
       C->thread_data[i].index = i;
-      C->thread_data[i].stage = TK_CMP_INIT;
       C->thread_data[i].hfirst = hfirst;
       C->thread_data[i].hlast = hfirst + hslice - 1;
       if (hremaining) {
