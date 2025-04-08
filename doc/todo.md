@@ -1,6 +1,7 @@
 # Later
 
 - Still room for performance improvement (see perf -g & numatop)
+    - Specifically, thread-local allocations for hidden unit subsets should help
 
 - Consider switching to floats, but avoid NaNs by clamping log probabilities
   within +/- 50  or 80 (make this a compilation flag)

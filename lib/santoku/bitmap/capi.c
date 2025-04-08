@@ -384,8 +384,8 @@ static int tk_bitmap_flip_interleave (lua_State *L)
 {
   lua_settop(L, 3);
   roaring64_bitmap_t *bm0 = peek(L, 1);
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int step = tk_lua_checkunsigned(L, 3);
+  uint64_t n = tk_lua_checkunsigned(L, 2);
+  uint64_t step = tk_lua_checkunsigned(L, 3);
   roaring64_bitmap_t *bm1 = roaring64_bitmap_create();
   if (bm1 == NULL)
     luaL_error(L, "memory error creating bitmap");
@@ -395,8 +395,8 @@ static int tk_bitmap_flip_interleave (lua_State *L)
   luaL_getmetatable(L, MT); // s, b, mt
   lua_setmetatable(L, -2); // s, b
   // TODO: is there a faster way to do this with set operations?
-  for (unsigned int i = 0; i < n; i ++)
-    for (unsigned int j = 0; j < step; j ++)
+  for (uint64_t i = 0; i < n; i ++)
+    for (uint64_t j = 0; j < step; j ++)
       if (roaring64_bitmap_contains(bm0, i * step + j))
         roaring64_bitmap_add(bm1,
           i * 2 * step + 0 * step + j);

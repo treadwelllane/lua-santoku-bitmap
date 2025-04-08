@@ -706,15 +706,15 @@ static inline void tk_compressor_latent_sums_thread (
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
   double *restrict lm10 = log_marg + 2 * n_hidden * n_visible;
   double *restrict lm11 = log_marg + 3 * n_hidden * n_visible;
-  for (unsigned int h = hfirst; h <= hlast; h++) {
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
     double *restrict sums0h = sums0 + h * n_samples;
     double *restrict sums1h = sums1 + h * n_samples;
     double *restrict lm00a = lm00 + h * n_visible;
     double *restrict lm01a = lm01 + h * n_visible;
     double *restrict lm10a = lm10 + h * n_visible;
     double *restrict lm11a = lm11 + h * n_visible;
-    double *restrict aph   = alpha + h * n_visible;
-    for (unsigned int b = 0; b < cardinality; b++) {
+    double *restrict aph = alpha + h * n_visible;
+    for (unsigned int b = 0; b < cardinality; b ++) {
       uint64_t s = samples[b];
       unsigned int v = visibles[b];
       sums0h[s] = sums0h[s] - aph[v] * lm00a[v] + aph[v] * lm10a[v];

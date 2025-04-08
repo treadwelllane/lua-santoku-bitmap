@@ -131,11 +131,11 @@ end)
 test("compress", function ()
   local rand = require("santoku.random")
   local originals = {}
-  local n_iterations = 10
-  local n_docs = 100
-  local n_cols_full = 784
-  local n_cols_reduced = 32
-  local n_threads = 4
+  local n_iterations = 20
+  local n_docs = 10000
+  local n_cols_full = 784 * 4
+  local n_cols_reduced = 32 * 4
+  local n_threads = nil
   for i = 1, n_docs do
     originals[i] = bm.create()
     for j = 1, n_cols_full do
