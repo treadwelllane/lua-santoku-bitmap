@@ -557,7 +557,7 @@ static inline void tk_compressor_marginals_thread (
     double sum_counts = counts_0 + counts_1;
     log_py[h] = log(counts_0) - log(sum_counts);
   }
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i++)
+  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++)
     counts[i] = 0;
   for (unsigned int h = hfirst; h <= hlast; h ++) {
     double sum_py0 = 0.0;
@@ -649,7 +649,7 @@ static inline void tk_compressor_marginals_thread (
       pc11a[v] = exp(lm11a[v] + lpy1v);
     }
   }
-  for (unsigned int h = hfirst; h <= hlast; h++) {
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
     double *restrict pc00a = pc00 + h * n_visible;
     double *restrict pc01a = pc01 + h * n_visible;
     double *restrict pc10a = pc10 + h * n_visible;
@@ -659,7 +659,7 @@ static inline void tk_compressor_marginals_thread (
     double *restrict lm01a = lm01 + h * n_visible;
     double *restrict lm11a = lm11 + h * n_visible;
     double *restrict misa   = mis   + h * n_visible;
-    for (unsigned int v = 0; v < n_visible; v++) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
       double group0 = pc00a[v] * lm00a[v] + pc01a[v] * lm01a[v];
       double group1 = pc10a[v] * lm10a[v] + pc11a[v] * lm11a[v];
       misa[v] = group0 * (1 - px[v]) + group1 * px[v];
@@ -944,7 +944,7 @@ static bool tk_compressor_setup_bits_iter (uint64_t val, void *statepv)
     .s = val / statep->n_visible,
     .v = (unsigned int)(val % statep->n_visible)
   };
-  statep->n++;
+  statep->n ++;
   return true;
 }
 
@@ -965,8 +965,8 @@ static inline void tk_compressor_setup_bits (
   if (!tile)
     qsort(pairs, state.n, sizeof(tk_compressor_sort_t), tk_compressor_cmp_sort);
   else
-    tk_compressor_tile_pairs(L, pairs, state.n, roaring64_bitmap_maximum(bm));
-  for (size_t i = 0; i < state.n; i++) {
+    tk_compressor_tile_pairs(L, pairs, state.n, n_visible);
+  for (size_t i = 0; i < state.n; i ++) {
     samples[i]  = pairs[i].s;
     visibles[i] = pairs[i].v;
   }
@@ -1001,7 +1001,7 @@ static inline void tk_compressor_init_alpha_thread (
   unsigned int hfirst,
   unsigned int hlast
 ) {
-  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i++)
+  for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++)
     alpha[i] = 0.5 + 0.5 * fast_drand();
 }
 
@@ -1235,7 +1235,7 @@ static inline void tk_pin_thread_to_cpu (
     unsigned int count = 0;
     for (unsigned int i = 0; i < cpus->size; ++i) {
       if (numa_bitmask_isbitset(cpus, i)) {
-        count++;
+        count ++;
       }
     }
     if (count > 0) {
@@ -1248,7 +1248,7 @@ static inline void tk_pin_thread_to_cpu (
             CPU_SET(i, &cpuset);
             break;
           }
-          found++;
+          found ++;
         }
       }
     }
