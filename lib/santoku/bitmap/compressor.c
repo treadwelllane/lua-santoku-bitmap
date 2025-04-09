@@ -1,8 +1,10 @@
 #define _GNU_SOURCE
+
 #include "lua.h"
 #include "lauxlib.h"
 #include "roaring.h"
 #include "roaring.c"
+
 #include <errno.h>
 #include <float.h>
 #include <math.h>
