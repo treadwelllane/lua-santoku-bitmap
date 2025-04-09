@@ -1,6 +1,8 @@
 # Now
 
-- Potential memory leak when pinning nodes
+- threaded computation of labels mutual information
+- integrate better error messages from tsetlin
+- function to retrieve top k feature ids from a trained model
 
 # Later
 
@@ -13,7 +15,6 @@
 
 - if density > 50%, flip bits before/after processing (so indexing works on
   smallest number)
-- fn to get stats, feature rankings, etc
 - bitmap.create from raw string
 - matrix/raw_matrix accept bitmaps or strings
 
