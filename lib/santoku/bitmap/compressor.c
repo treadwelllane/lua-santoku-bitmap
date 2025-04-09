@@ -335,7 +335,6 @@ static inline void *tk_ensure_interleaved (
   } else {
     if (copy)
       memcpy(p1, p0, s0);
-    *s1p = s1;
     numa_free(p0, s0);
     return p1;
   }
