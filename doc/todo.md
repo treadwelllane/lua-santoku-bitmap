@@ -1,9 +1,13 @@
 # Now
 
+- Add early stopping logic to C, normalized by mean:
+    `fabs(avg(tcs, -10, -4) - avg(tcs, -5, -1)) / avg(tcs, -5, -1) < eps_norm`
+
 - Function to return a list of the top-k features by MI,
     - Usable without creating a compressor (expose on module metatable)
     - Threaded
     - Returns a sorted list of the top-k features
+    - Users can alternatively specify MI threshold for dynamic k
 
 - Threaded tiling of set bits
 
