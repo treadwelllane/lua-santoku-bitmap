@@ -1636,7 +1636,7 @@ static inline int tk_compressor_create (lua_State *L)
   unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "visible");
   unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "hidden");
   double lam = tk_lua_foptnumber(L, 1, "lam", 0.3);
-  double spa = tk_lua_foptnumber(L, 1, "spa", 5.0);
+  double spa = tk_lua_foptnumber(L, 1, "spa", 10.0);
   double tmin = tk_lua_foptnumber(L, 1, "tmin", 1.0);
   double ttc = tk_lua_foptnumber(L, 1, "ttc", 500.0);
   unsigned int n_threads;
