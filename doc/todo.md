@@ -1,5 +1,6 @@
 # Now
 
+- Generate raw bitmap for compress, threaded
 - Handle the case where n_hidden is too small, resulting in NaNs
 
 # Later
