@@ -12,6 +12,7 @@
 
 - Generate raw bitmap for compress, threaded
 - Handle the case where n_hidden is too small, resulting in NaNs
+- Integrate better error messages from tsetlin
 
 # Later
 
@@ -24,7 +25,6 @@
 
 - if density > 50%, flip bits before/after processing (so indexing works on
   smallest number)
-- fn to get stats, feature rankings, etc
 - bitmap.create from raw string
 - matrix/raw_matrix accept bitmaps or strings
 

@@ -7,6 +7,7 @@ local assert = err.assert
 local vdt = require("santoku.validate")
 local eq = vdt.isequal
 local bm = require("santoku.bitmap")
+local mtx = require("santoku.matrix")
 local bmc = require("santoku.bitmap.compressor")
 
 test("chunk bits", function ()
@@ -130,6 +131,7 @@ end)
 test("compress", function ()
   local rand = require("santoku.random")
   local originals = {}
+  local labels = {}
   local n_iterations = 20
   local n_docs = 10000
   local n_cols_full = 1786
@@ -137,6 +139,7 @@ test("compress", function ()
   local n_threads = nil
   for i = 1, n_docs do
     originals[i] = bm.create()
+    labels[i] = rand.num() > 0.5 and 1 or 0
     for j = 1, n_cols_full do
       if rand.num() > 0.95 then
         bm.set(originals[i], j)
@@ -144,6 +147,7 @@ test("compress", function ()
     end
   end
   local corpus_original = bm.matrix(originals, n_cols_full)
+  labels = mtx.raw(mtx.create(labels), nil, nil, "u32")
   print()
   local compressor = bmc.create({
     visible = n_cols_full,
@@ -154,6 +158,9 @@ test("compress", function ()
   compressor.train({
     corpus = corpus_original,
     samples = n_docs,
+    labels = labels,
+    supervision = 0.5,
+    n_labels = 2,
     iterations = n_iterations,
     each = function (i, c, d)
       local duration = stopwatch()
