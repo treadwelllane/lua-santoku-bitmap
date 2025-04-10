@@ -85,6 +85,7 @@ typedef struct tk_compressor_s {
   double spa;
   double tmin;
   double ttc;
+  double smoothing;
   unsigned int n_visible;
   unsigned int n_hidden;
   pthread_mutex_t mutex;
@@ -98,8 +99,6 @@ typedef struct tk_compressor_s {
   bool created_threads;
   unsigned int sigid;
 } tk_compressor_t;
-
-#define tk_cmp_smoothing 1e-10
 
 static inline void tk_lua_callmod (
   lua_State *L,
@@ -534,6 +533,7 @@ static inline void tk_compressor_marginals_thread (
   double *restrict px,
   double *restrict entropy_x,
   double *restrict tcs,
+  double smoothing,
   double tmin,
   double ttc,
   unsigned int n_samples,
@@ -556,8 +556,8 @@ static inline void tk_compressor_marginals_thread (
   double *restrict tmp11 = lm11 + hfirst * n_visible;
   for (unsigned int h = hfirst; h <= hlast; h ++) {
     double *restrict pyx0 = pyx + h * n_samples;
-    double counts_0 = tk_cmp_smoothing;
-    double counts_1 = tk_cmp_smoothing;
+    double counts_0 = smoothing;
+    double counts_1 = smoothing;
     for (unsigned int s = 0; s < n_samples; s ++) {
       counts_0 += pyx0[s];
       counts_1 += (1 - pyx0[s]);
@@ -610,10 +610,10 @@ static inline void tk_compressor_marginals_thread (
     }
   }
   for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
-    pc00[i] += tk_cmp_smoothing;
-    pc01[i] += tk_cmp_smoothing;
-    pc10[i] += tk_cmp_smoothing;
-    pc11[i] += tk_cmp_smoothing;
+    pc00[i] += smoothing;
+    pc01[i] += smoothing;
+    pc10[i] += smoothing;
+    pc11[i] += smoothing;
   }
   for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
     double log_total0 = log(pc00[i] + pc01[i]);
@@ -1009,7 +1009,7 @@ static inline void tk_compressor_data_stats (
     double entropy = 0;
     entropy -= px[v] * log(px[v]);
     entropy -= (1 - px[v]) * log(1 - px[v]);
-    entropy_x[v] = entropy > 0 ? entropy : tk_cmp_smoothing;
+    entropy_x[v] = entropy > 0 ? entropy : 1e-10;
   }
 }
 
@@ -1102,6 +1102,7 @@ static void *tk_compressor_worker (void *datap)
           data->C->px,
           data->C->entropy_x,
           data->C->tcs,
+          data->C->smoothing,
           data->C->tmin,
           data->C->ttc,
           data->n_samples,
@@ -1381,6 +1382,7 @@ static inline void _tk_compressor_train (
   unsigned int max_iter,
   int i_each
 ) {
+  C->smoothing = fmax(1e-10, 1.0 / (double) n_samples);
   C->pyx = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   C->sums = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
