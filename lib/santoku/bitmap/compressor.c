@@ -337,7 +337,10 @@ static inline void *tk_ensure_interleaved (
   } else {
     if (copy)
       memcpy(p1, p0, s0);
-    numa_free(p0, s0);
+    if (numa_available() == -1)
+      free(p0);
+    else
+      numa_free(p0, s0);
     return p1;
   }
 }
@@ -659,11 +662,11 @@ static inline void tk_compressor_marginals_thread (
     double *restrict lm10a = lm10 + h * n_visible;
     double *restrict lm01a = lm01 + h * n_visible;
     double *restrict lm11a = lm11 + h * n_visible;
-    double *restrict misa   = mis   + h * n_visible;
+    double *restrict mish = mis + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++) {
       double group0 = pc00a[v] * lm00a[v] + pc01a[v] * lm01a[v];
       double group1 = pc10a[v] * lm10a[v] + pc11a[v] * lm11a[v];
-      misa[v] = group0 * (1 - px[v]) + group1 * px[v];
+      mish[v] = group0 * (1 - px[v]) + group1 * px[v];
     }
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, non-affine base
@@ -1331,8 +1334,7 @@ static inline int tk_compressor_compress (lua_State *L)
   C->mis = tk_realloc(L, C->mis, C->n_hidden * n_samples * sizeof(double));
   C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
-  unsigned int len_sums = (2 * C->n_hidden * (n_samples > C->n_visible ? n_samples : C->n_visible));
-  C->sums = tk_realloc(L, C->sums, len_sums * sizeof(double));
+  C->sums = tk_realloc(L, C->sums, 2 * C->n_hidden * n_samples * sizeof(double));
   tk_compressor_signal(
     TK_CMP_LATENT_ALL, &C->sigid,
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,

@@ -133,13 +133,13 @@ test("compress", function ()
   local originals = {}
   local n_iterations = 20
   local n_docs = 10000
-  local n_cols_full = 784 * 2
-  local n_cols_reduced = 32 * 2
+  local n_cols_full = 1786
+  local n_cols_reduced = 128
   local n_threads = nil
   for i = 1, n_docs do
     originals[i] = bm.create()
     for j = 1, n_cols_full do
-      if rand.num() > 0.9 then
+      if rand.num() > 0.95 then
         bm.set(originals[i], j)
       end
     end
