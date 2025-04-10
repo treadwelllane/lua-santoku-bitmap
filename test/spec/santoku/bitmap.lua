@@ -157,11 +157,10 @@ test("compress", function ()
     corpus = corpus_original,
     samples = n_docs,
     iterations = n_iterations,
-    each = function (i, c)
+    each = function (i, c, d)
       local duration = stopwatch()
-      local ca = mavg(num.abs(c))
-      str.printf(" %3d   %3.4f   %6.4f   %6.4f\n", i, duration, c, ca)
-      return i < 5 or num.abs(c - ca) > 0.0001
+      str.printf(" %3d   %3.4f   %6.4f   %6.4f\n", i, duration, c, d)
+      return true
     end
   })
   local corpus_compressed = compressor.compress(corpus_original, n_docs)

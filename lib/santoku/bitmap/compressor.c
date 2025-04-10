@@ -79,8 +79,10 @@ typedef struct tk_compressor_s {
   double *pyx;
   double *counts;
   double last_tc;
+  double tc_dev;
   double *tcs;
   double lam;
+  double spa;
   double tmin;
   double ttc;
   unsigned int n_visible;
@@ -705,6 +707,7 @@ static inline void tk_compressor_alpha_thread (
   double *restrict mis,
   double *restrict maxmis,
   double lam,
+  double spa,
   unsigned int n_visible,
   unsigned int n_hidden,
   unsigned int hfirst,
@@ -718,7 +721,7 @@ static inline void tk_compressor_alpha_thread (
     double *restrict alphah = alpha + h * n_visible;
     double *restrict mish = mis + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++)
-      alphah[v] = (1.0 - lam) * alphah[v] + lam * exp(tcs[h] * (mish[v] - maxmis[v]));
+      alphah[v] = (1.0 - lam) * alphah[v] + lam * exp(tcs[h] * (mish[v] - maxmis[v]) / spa);
   }
   for (unsigned int h = hfirst; h <= hlast; h ++) { // not vectorized, unsupported outer form
     double s0 = 0.0, s1 = 0.0;
@@ -861,12 +864,21 @@ static inline void tk_compressor_update_tc_thread (
 static inline void tk_compressor_update_last_tc (
   double *restrict tcs,
   double *last_tc,
+  double *tc_dev,
   unsigned int n_hidden
 ) {
-  double sum0 = 0.0;
-  for (unsigned int h = 0; h < n_hidden; h ++)
-    sum0 += tcs[h];
-  *last_tc = sum0;
+  double min = tcs[0], max = tcs[0], sum = 0.0, sumsq = 0.0;
+  for (unsigned int h = 0; h < n_hidden; h ++) {
+    double tc = tcs[h];
+    sum += tc;
+    sumsq += tc * tc;
+    if (tc < min) min = tc;
+    if (tc > max) max = tc;
+  }
+  double mean = sum / n_hidden;
+  double stdev = sqrt(sumsq / n_hidden - mean * mean);
+  *last_tc = sum;
+  *tc_dev = stdev;
 }
 
 static int tk_compressor_cmp_sort (const void *ap, const void *bp)
@@ -1114,6 +1126,7 @@ static void *tk_compressor_worker (void *datap)
           data->C->mis,
           data->C->maxmis,
           data->C->lam,
+          data->C->spa,
           data->C->n_visible,
           data->C->n_hidden,
           data->hfirst,
@@ -1418,12 +1431,14 @@ static inline void _tk_compressor_train (
     tk_compressor_update_last_tc(
       C->tcs,
       &C->last_tc,
+      &C->tc_dev,
       C->n_hidden);
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
       lua_pushnumber(L, C->last_tc);
-      lua_call(L, 2, 1);
+      lua_pushnumber(L, C->tc_dev);
+      lua_call(L, 3, 1);
       if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0)
         break;
       lua_pop(L, 1);
@@ -1436,6 +1451,10 @@ static inline void _tk_compressor_train (
 static inline void tk_compressor_init (
   lua_State *L,
   tk_compressor_t *C,
+  double lam,
+  double spa,
+  double tmin,
+  double ttc,
   unsigned int n_visible,
   unsigned int n_hidden,
   unsigned int n_threads
@@ -1443,9 +1462,10 @@ static inline void tk_compressor_init (
   memset(C, 0, sizeof(tk_compressor_t));
   C->n_visible = n_visible;
   C->n_hidden = n_hidden;
-  C->lam = 0.3;
-  C->tmin = 1.0;
-  C->ttc = 500.0;
+  C->lam = lam;
+  C->spa = spa;
+  C->tmin = tmin;
+  C->ttc = ttc;
   C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
   C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
   C->log_py = tk_malloc(L, C->n_hidden * sizeof(double));
@@ -1516,6 +1536,7 @@ static inline int tk_compressor_persist (lua_State *L)
   tk_lua_fwrite(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->lam, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &C->spa, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &C->tmin, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &C->ttc, sizeof(double), 1, fh);
   tk_lua_fwrite(L, C->alpha, sizeof(double), C->n_hidden * C->n_visible, fh);
@@ -1585,6 +1606,7 @@ static inline int tk_compressor_load (lua_State *L)
   tk_lua_fread(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &C->lam, sizeof(double), 1, fh);
+  tk_lua_fread(L, &C->spa, sizeof(double), 1, fh);
   tk_lua_fread(L, &C->tmin, sizeof(double), 1, fh);
   tk_lua_fread(L, &C->ttc, sizeof(double), 1, fh);
   C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
@@ -1613,6 +1635,10 @@ static inline int tk_compressor_create (lua_State *L)
   lua_settop(L, 1);
   unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "visible");
   unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "hidden");
+  double lam = tk_lua_foptnumber(L, 1, "lam", 0.3);
+  double spa = tk_lua_foptnumber(L, 1, "spa", 5.0);
+  double tmin = tk_lua_foptnumber(L, 1, "tmin", 1.0);
+  double ttc = tk_lua_foptnumber(L, 1, "ttc", 500.0);
   unsigned int n_threads;
   if (tk_lua_ftype(L, 1, "threads") != LUA_TNIL) {
     // TODO: allow passing 0 to run everything on the main thread.
@@ -1631,7 +1657,7 @@ static inline int tk_compressor_create (lua_State *L)
     lua_newuserdata(L, sizeof(tk_compressor_t)); // c
   luaL_getmetatable(L, MT_COMPRESSOR); // c mt
   lua_setmetatable(L, -2); // c
-  tk_compressor_init(L, C, n_visible, n_hidden, n_threads); // c
+  tk_compressor_init(L, C, lam, spa, tmin, ttc, n_visible, n_hidden, n_threads); // c
   lua_newtable(L); // c t
   lua_pushvalue(L, -2); // c t c
   tk_lua_register(L, mt_fns, 1); // t

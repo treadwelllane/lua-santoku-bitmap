@@ -1,7 +1,6 @@
 # Now
 
 - Handle the case where n_hidden is too small, resulting in NaNs
-- Potential memory leak when pinning nodes
 
 # Later
 
