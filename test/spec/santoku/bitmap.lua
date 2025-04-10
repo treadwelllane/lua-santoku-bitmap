@@ -1,6 +1,5 @@
 local test = require("santoku.test")
 local utc = require("santoku.utc")
-local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local fs = require("santoku.fs")
@@ -152,7 +151,6 @@ test("compress", function ()
     threads = n_threads,
   })
   local stopwatch = utc.stopwatch(0.1)
-  local mavg = num.mavg(0.2)
   compressor.train({
     corpus = corpus_original,
     samples = n_docs,

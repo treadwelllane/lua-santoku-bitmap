@@ -99,6 +99,8 @@ typedef struct tk_compressor_s {
   unsigned int sigid;
 } tk_compressor_t;
 
+#define tk_cmp_smoothing 1e-10
+
 static inline void tk_lua_callmod (
   lua_State *L,
   int nargs,
@@ -554,8 +556,8 @@ static inline void tk_compressor_marginals_thread (
   double *restrict tmp11 = lm11 + hfirst * n_visible;
   for (unsigned int h = hfirst; h <= hlast; h ++) {
     double *restrict pyx0 = pyx + h * n_samples;
-    double counts_0 = 0.001;
-    double counts_1 = 0.001;
+    double counts_0 = tk_cmp_smoothing;
+    double counts_1 = tk_cmp_smoothing;
     for (unsigned int s = 0; s < n_samples; s ++) {
       counts_0 += pyx0[s];
       counts_1 += (1 - pyx0[s]);
@@ -608,10 +610,10 @@ static inline void tk_compressor_marginals_thread (
     }
   }
   for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
-    pc00[i] += 0.001;
-    pc01[i] += 0.001;
-    pc10[i] += 0.001;
-    pc11[i] += 0.001;
+    pc00[i] += tk_cmp_smoothing;
+    pc01[i] += tk_cmp_smoothing;
+    pc10[i] += tk_cmp_smoothing;
+    pc11[i] += tk_cmp_smoothing;
   }
   for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++) {
     double log_total0 = log(pc00[i] + pc01[i]);
@@ -1007,7 +1009,7 @@ static inline void tk_compressor_data_stats (
     double entropy = 0;
     entropy -= px[v] * log(px[v]);
     entropy -= (1 - px[v]) * log(1 - px[v]);
-    entropy_x[v] = entropy > 0 ? entropy : 1e-10;
+    entropy_x[v] = entropy > 0 ? entropy : tk_cmp_smoothing;
   }
 }
 

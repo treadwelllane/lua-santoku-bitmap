@@ -1,5 +1,9 @@
 # Now
 
+- When supervision = 1, skip training loop, compute mis_label, compute
+  `top_visible` as the top `n_hidden` visibles from `mis_label`, and during
+  compress, just look up `top_visible` in the input and set it if it's found.
+
 - Generate raw bitmap for compress, threaded
 - Handle the case where n_hidden is too small, resulting in NaNs
 
