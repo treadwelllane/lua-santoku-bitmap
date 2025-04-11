@@ -40,6 +40,13 @@ static inline int tk_error (
   return 1;
 }
 
+static inline int tk_lua_error (lua_State *L, const char *err)
+{
+  lua_pushstring(L, err);
+  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
+  return 0;
+}
+
 static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
 {
   lua_Integer l = luaL_checkinteger(L, i);
@@ -406,6 +413,131 @@ static int tk_bitmap_flip_interleave (lua_State *L)
   return 1;
 }
 
+typedef struct {
+  unsigned int *labels;
+  uint64_t *active_counts;
+  double *px;
+  unsigned int n_labels;
+  unsigned int n_visible;
+} mi_state_t;
+
+static bool tk_bitmap_mi_iter (uint64_t val, void *statepv)
+{
+  mi_state_t *statep = (mi_state_t *) statepv;
+  unsigned int sample = val / statep->n_visible;
+  unsigned int feature = val % statep->n_visible;
+  unsigned int label = statep->labels[sample];
+  statep->px[feature] ++;
+  statep->active_counts[feature * statep->n_labels + label] ++;
+  return true;
+}
+
+typedef struct {
+  double mi;
+  unsigned int v;
+} tk_bitmap_mi_pair;
+
+static int tk_bitmap_mi_sort (const void *ap, const void *bp)
+{
+  const tk_bitmap_mi_pair *a = (const tk_bitmap_mi_pair *)ap;
+  const tk_bitmap_mi_pair *b = (const tk_bitmap_mi_pair *)bp;
+  if (a->mi > b->mi) return -1;
+  if (a->mi < b->mi) return  1;
+  return 0;
+}
+
+static int tk_bitmap_top_mutual_information (lua_State *L)
+{
+  lua_settop(L, 6);
+  roaring64_bitmap_t *bm0 = peek(L, 1);
+  unsigned int *labels = (unsigned int *) luaL_checkstring(L, 2);
+  uint64_t n_samples = tk_lua_checkunsigned(L, 3);
+  uint64_t n_visible = tk_lua_checkunsigned(L, 4);
+  uint64_t n_labels = tk_lua_checkunsigned(L, 5);
+  double min_mi = luaL_checknumber(L, 6);
+  tk_bitmap_mi_pair *mis = tk_malloc(L, n_visible * sizeof(tk_bitmap_mi_pair));
+  for (unsigned int v = 0; v < n_visible; v ++)
+    mis[v] = (tk_bitmap_mi_pair) { .mi = 0, .v = v };
+  unsigned int *global_counts = tk_malloc(L, n_labels * sizeof(unsigned int));
+  for (unsigned int y = 0; y < n_labels; y ++)
+    global_counts[y] = 0;
+  for (unsigned int s = 0; s < n_samples; s ++) {
+    unsigned int y = labels[s];
+    if (y >= n_labels)
+      tk_lua_error(L, "provided label is outside of range 0 to n_labels - 1");
+    global_counts[y] ++;
+  }
+  mi_state_t state;
+  state.labels = labels;
+  uint64_t *active_counts = tk_malloc(L, n_visible * n_labels * sizeof(uint64_t));
+  double *px = tk_malloc(L, n_visible * sizeof(double));
+  state.active_counts = active_counts;
+  state.px = px;
+  state.n_labels = n_labels;
+  state.n_visible = n_visible;
+  memset(state.active_counts, 0, n_visible * n_labels * sizeof(unsigned int));
+  memset(state.px, 0, n_visible * sizeof(double));
+  roaring64_bitmap_iterate(bm0, tk_bitmap_mi_iter, &state);
+  for (unsigned int v = 0; v < n_visible; v ++)
+    state.px[v] /= (double) n_samples;
+  for (unsigned int v = 0; v < n_visible; v ++) {
+    unsigned int active_total = 0;
+    for (unsigned int y = 0; y < n_labels; y ++)
+      active_total += active_counts[v * n_labels + y];
+    if (active_total == 0)
+      continue;
+    double p_active = px[v];
+    double p_inactive = 1.0 - p_active;
+    double mi = 0.0;
+    for (unsigned int y = 0; y < n_labels; y ++) {
+      double joint_active = ((double) active_counts[v * n_labels + y]) / n_samples;
+      double joint_inactive = ((double) (global_counts[y] - active_counts[v * n_labels + y])) / n_samples;
+      double p_y = ((double) global_counts[y]) / n_samples;
+      if (joint_active > 0 && p_active > 0 && p_y > 0) {
+        double denom = p_active * p_y;
+        mi += joint_active * log(joint_active / denom);
+      }
+      if (joint_inactive > 0 && p_inactive > 0 && p_y > 0) {
+        double denom = p_inactive * p_y;
+        mi += joint_inactive * log(joint_inactive / denom);
+      }
+    }
+    mis[v].mi = mi;
+  }
+  double max_mi = 1e-10;
+  for (unsigned int v = 0; v < n_visible; v++) {
+    if (mis[v].mi > max_mi)
+      max_mi = mis[v].mi;
+  }
+  for (unsigned int v = 0; v < n_visible; v++) {
+    mis[v].mi /= max_mi;
+  }
+  free(global_counts);
+  free(active_counts);
+  free(px);
+  qsort(mis, n_visible, sizeof(tk_bitmap_mi_pair), tk_bitmap_mi_sort);
+  lua_newtable(L);
+  if (min_mi > 1) { // top k
+    unsigned int m = (unsigned int) floor(min_mi);
+    m = m > n_visible ? n_visible : m;
+    for (unsigned int i = 0; i < m; i ++) {
+      lua_pushinteger(L, i + 1);
+      lua_pushinteger(L, mis[i].v);
+      lua_settable(L, -3);
+    }
+  } else { // top by mi
+    for (unsigned int i = 0; i < n_visible; i ++) {
+      if (mis[i].mi < min_mi)
+        break;
+      lua_pushinteger(L, i + 1);
+      lua_pushinteger(L, mis[i].v);
+      lua_settable(L, -3);
+    }
+  }
+  free(mis);
+  return 1;
+}
+
 static luaL_Reg fns[] =
 {
   { "create", tk_bitmap_create },
@@ -427,6 +559,7 @@ static luaL_Reg fns[] =
   { "xor", tk_bitmap_xor },
   { "flip", tk_bitmap_flip },
   { "flip_interleave", tk_bitmap_flip_interleave },
+  { "top_mutual_information", tk_bitmap_top_mutual_information },
   { "extend", tk_bitmap_extend },
   { "bits", tk_bitmap_bits },
   { NULL, NULL }

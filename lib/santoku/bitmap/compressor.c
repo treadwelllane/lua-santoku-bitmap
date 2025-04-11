@@ -68,10 +68,6 @@ typedef struct tk_compressor_s {
   double *sums;
   double *baseline;
   tk_compressor_sort_t *sort;
-  size_t mis_label_len;
-  double *mis_label;
-  double supervision;
-  unsigned int n_labels;
   size_t samples_len;
   uint64_t *samples;
   size_t visibles_len;
@@ -436,14 +432,10 @@ static inline void tk_compressor_shrink (tk_compressor_t *C)
   free(C->counts); C->counts = NULL;
   free(C->tcs); C->tcs = NULL;
   if (numa_available() == -1) {
-    free(C->mis_label); C->mis_label = NULL;
-    C->n_labels = 0;
-    C->supervision = 0;
     free(C->maxmis); C->maxmis = NULL;
     free(C->px); C->px = NULL;
     free(C->entropy_x); C->entropy_x = NULL;
   } else {
-    numa_free(C->mis_label, C->mis_label_len); C->mis_label = NULL; C->mis_label_len = 0;
     numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL; C->maxmis_len = 0;
     numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL; C->entropy_len = 0;
     numa_free(C->px, C->px_len); C->px = NULL; C->px_len = 0;
@@ -568,8 +560,6 @@ static inline void tk_compressor_marginals_thread (
   double *restrict entropy_x,
   double *restrict tcs,
   double smoothing,
-  double *restrict mis_label,
-  double supervision,
   double tmin,
   double ttc,
   unsigned int n_samples,
@@ -713,9 +703,6 @@ static inline void tk_compressor_marginals_thread (
     double *restrict mish = mis + h * n_visible;
     for (unsigned int v = 0; v < n_visible; v ++)
       mish[v] /= entropy_x[v];
-    if (mis_label != NULL)
-      for (unsigned int v = 0; v < n_visible; v ++)
-        mish[v] = (1.0 - supervision) * mish[v] + supervision * mis_label[v];
   }
   for (unsigned int h = hfirst; h <= hlast; h ++)
     tcs[h] = fabs(tcs[h]) * ttc + tmin;
@@ -1029,25 +1016,16 @@ static inline void tk_compressor_setup_bits (
   }
 }
 
-// Does this make sense to parallize? I don't think so...
 static inline void tk_compressor_data_stats (
-  lua_State *L,
-  roaring64_bitmap_t *bm,
   uint64_t cardinality,
   unsigned int *restrict visibles,
-  unsigned int *restrict labels,
   double *restrict px,
   double *restrict entropy_x,
-  double *restrict mis_label,
   unsigned int n_samples,
-  unsigned int n_labels,
   unsigned int n_visible
 ) {
   for (unsigned int v = 0; v < n_visible; v ++)
     px[v] = 0;
-  if (mis_label)
-    for (unsigned int v = 0; v < n_visible; v ++)
-      mis_label[v] = 0;
   for (uint64_t c = 0; c < cardinality; c ++)
     px[visibles[c]] ++;
   for (unsigned int v = 0; v < n_visible; v ++)
@@ -1058,44 +1036,6 @@ static inline void tk_compressor_data_stats (
     entropy -= (1 - px[v]) * log(1 - px[v]);
     entropy_x[v] = entropy > 0 ? entropy : 1e-10;
   }
-  if (mis_label == NULL)
-    return;
-  unsigned int *counts = tk_malloc(L, 2 * n_labels * sizeof(unsigned int));
-  for (unsigned int v = 0; v < n_visible; v ++) {
-    for (unsigned int i = 0; i < 2 * n_labels; i ++)
-      counts[i] = 0;
-    for (unsigned int s = 0; s < n_samples; s ++) {
-      unsigned int y = labels[s];
-      if (y >= n_labels)
-        tk_lua_error(L, "provided label is outside of range 0 to n_labels - 1");
-      unsigned int is_active = roaring64_bitmap_contains(bm, s * n_visible + v);
-      counts[is_active * n_labels + y] ++;
-    }
-    double mi = 0;
-    for (unsigned int x = 0; x < 2; x ++) {
-      for (unsigned int y = 0; y < n_labels; y ++) {
-        double joint = (double) counts[x * n_labels + y] / n_samples;
-        if (joint == 0)
-          continue;
-        double px_val = (double) (counts[0 * n_labels + y] + counts[1 * n_labels + y]) / n_samples;
-        double py_val = 0;
-        for (unsigned int k = 0; k < n_labels; k++)
-          py_val += counts[x * n_labels + k];
-        py_val /= n_samples;
-        double denom = px_val * py_val;
-        if (denom > 0)
-          mi += joint * log(joint / denom);
-      }
-    }
-    mis_label[v] = mi;
-  }
-  double max_mi = 1e-10;
-  for (unsigned int v = 0; v < n_visible; v++)
-    if (mis_label[v] > max_mi)
-      max_mi = mis_label[v];
-  for (unsigned int v = 0; v < n_visible; v++)
-    mis_label[v] /= max_mi;
-  free(counts);
 }
 
 static inline void tk_compressor_init_alpha_thread (
@@ -1188,8 +1128,6 @@ static void *tk_compressor_worker (void *datap)
           data->C->entropy_x,
           data->C->tcs,
           data->C->smoothing,
-          data->C->mis_label,
-          data->C->supervision,
           data->C->tmin,
           data->C->ttc,
           data->n_samples,
@@ -1465,10 +1403,7 @@ static inline void _tk_compressor_train (
   lua_State *L,
   tk_compressor_t *C,
   roaring64_bitmap_t *bm,
-  unsigned int *labels,
   unsigned int n_samples,
-  unsigned int n_labels,
-  double supervision,
   unsigned int max_iter,
   int i_each
 ) {
@@ -1484,21 +1419,13 @@ static inline void _tk_compressor_train (
   C->sort = tk_malloc(L, cardinality * sizeof(tk_compressor_sort_t));
   C->samples = tk_malloc_interleaved(L, &C->samples_len, cardinality * sizeof(uint64_t));
   C->visibles = tk_malloc_interleaved(L, &C->visibles_len, cardinality * sizeof(unsigned int));
-  C->supervision = supervision;
-  C->n_labels = n_labels;
-  C->mis_label = labels == NULL ? NULL : tk_malloc_interleaved(L, &C->mis_label_len, C->n_visible * sizeof(double));
   tk_compressor_setup_bits(L, bm, C->sort, C->samples, C->visibles, C->n_visible, true);
   tk_compressor_data_stats(
-    L,
-    bm,
     cardinality,
     C->visibles,
-    labels,
     C->px,
     C->entropy_x,
-    C->mis_label,
     n_samples,
-    n_labels,
     C->n_visible);
   tk_compressor_setup_threads(L, C, cardinality, n_samples);
   tk_compressor_signal(
@@ -1616,24 +1543,13 @@ static inline int tk_compressor_train (lua_State *L) {
   roaring64_bitmap_t *bm = *((roaring64_bitmap_t **)
     tk_lua_fcheckuserdata(L, 1, "corpus", MT_BITMAP));
   unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "samples");
-  size_t labels_len = 0;
-  unsigned int *labels = NULL;
-  unsigned int n_labels = 0;
-  double supervision = 0;
-  if (tk_lua_ftype(L, 1, "labels") != LUA_TNIL) {
-    labels = (unsigned int *) tk_lua_fchecklstring(L, 1, "labels", &labels_len);
-    if (labels_len != sizeof(unsigned int) * n_samples)
-      return tk_lua_error(L, "length of labels array doesn't match the number of samples\n");
-    n_labels = tk_lua_fcheckunsigned(L, 1, "n_labels");
-    supervision = tk_lua_fcheckposdouble(L, 1, "supervision");
-  }
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "iterations");
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  _tk_compressor_train(L, C, bm, labels, n_samples, n_labels, supervision, max_iter, i_each); // c
+  _tk_compressor_train(L, C, bm, n_samples, max_iter, i_each); // c
   return 0;
 }
 

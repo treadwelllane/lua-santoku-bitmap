@@ -3,6 +3,9 @@
 - Add early stopping logic to C, normalized by mean:
     `fabs(avg(tcs, -10, -4) - avg(tcs, -5, -1)) / avg(tcs, -5, -1) < eps_norm`
 
+- Leverage visibles array for mis_label computation. No need to iterate full
+  feature space
+
 - Function to return a list of the top-k features by MI,
     - Usable without creating a compressor (expose on module metatable)
     - Threaded
@@ -10,9 +13,6 @@
     - Users can alternatively specify MI threshold for dynamic k
 
 - Threaded tiling of set bits
-
-- Error on supervision == 1. In this case, just use the rank by MI function and
-  filter the tokenizer.
 
 - Generate raw bitmap for compress, threaded
 - Handle the case where n_hidden is too small, resulting in NaNs
