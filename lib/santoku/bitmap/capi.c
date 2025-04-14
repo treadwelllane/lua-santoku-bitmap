@@ -29,6 +29,14 @@ static inline void tk_lua_callmod (
   lua_call(L, nargs, nret); // results
 }
 
+static inline double tk_lua_checkposdouble (lua_State *L, int i)
+{
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  return (double) l;
+}
+
 static inline int tk_error (
   lua_State *L,
   const char *label,
@@ -538,6 +546,96 @@ static int tk_bitmap_top_mutual_information (lua_State *L)
   return 1;
 }
 
+static inline roaring64_bitmap_t *_tk_bitmap_convolve_2d (
+  roaring64_bitmap_t *bm,
+  unsigned int n_samples,
+  unsigned int sample_width,
+  unsigned int sample_height,
+  unsigned int patch_width,
+  unsigned int patch_height,
+  unsigned int stride_x,
+  unsigned int stride_y,
+  unsigned int align,
+  unsigned int *num_patchesp,
+  unsigned int *patch_sizep
+) {
+  roaring64_bitmap_t *out_bm = roaring64_bitmap_create();
+  unsigned int patches_x = 0, patches_y = 0;
+  if (sample_width >= patch_width)
+    patches_x = ((sample_width - patch_width) / stride_x) + 1;
+  if (sample_height >= patch_height)
+    patches_y = ((sample_height - patch_height) / stride_y) + 1;
+  unsigned int num_patches = patches_x * patches_y;
+  unsigned int patch_size = patch_width * patch_height;
+  unsigned int patch_size_aligned = patch_size;
+  if (align > 0) {
+    unsigned int remainder = patch_size % align;
+    if (remainder)
+      patch_size_aligned = patch_size + (align - remainder);
+  }
+  *num_patchesp = num_patches;
+  *patch_sizep  = patch_size_aligned;
+  uint64_t out_bits_per_sample = (uint64_t)num_patches * patch_size_aligned;
+  for (unsigned int s = 0; s < n_samples; s ++) {
+    uint64_t sample_out_base = (uint64_t) s * out_bits_per_sample;
+    unsigned int p_index = 0; // patch index
+    for (unsigned int py = 0; py < patches_y; py ++) {
+      for (unsigned int px = 0; px < patches_x; px ++) {
+        unsigned int x0 = px * stride_x;
+        unsigned int y0 = py * stride_y;
+        uint64_t patch_out_base = sample_out_base + (uint64_t) p_index * patch_size_aligned;
+        unsigned int bit_in_patch = 0;
+        for (unsigned int ry = 0; ry < patch_height; ry ++) {
+          for (unsigned int rx = 0; rx < patch_width; rx ++) {
+            unsigned int x = x0 + rx;
+            unsigned int y = y0 + ry;
+            uint64_t in_bit =
+                (uint64_t) s * ((uint64_t) sample_width * sample_height) +
+                (uint64_t) y * sample_width +
+                (uint64_t) x;
+            if (roaring64_bitmap_contains(bm, in_bit)) {
+              uint64_t out_bit = patch_out_base + bit_in_patch;
+              roaring64_bitmap_add(out_bm, out_bit);
+            }
+            bit_in_patch ++;
+          }
+        }
+        p_index ++;
+      }
+    }
+  }
+  return out_bm;
+}
+
+static int tk_bitmap_convolve_2d (lua_State *L)
+{
+  roaring64_bitmap_t *bm0 = peek(L, 1);
+  unsigned int samples = tk_lua_checkunsigned(L, 2);
+  unsigned int width = tk_lua_checkunsigned(L, 3);
+  unsigned int height = tk_lua_checkunsigned(L, 4);
+  unsigned int width_patch = tk_lua_checkunsigned(L, 5);
+  unsigned int height_patch = tk_lua_checkunsigned(L, 6);
+  unsigned int stride_x = tk_lua_checkunsigned(L, 7);
+  unsigned int stride_y = tk_lua_checkunsigned(L, 8);
+  unsigned int align = tk_lua_checkunsigned(L, 9);
+  unsigned int num_patches, patch_size;
+  roaring64_bitmap_t *bm1 = _tk_bitmap_convolve_2d(
+    bm0, samples,
+    width, height,
+    width_patch, height_patch,
+    stride_x, stride_y,
+    align,
+    &num_patches, &patch_size);
+  roaring64_bitmap_t **bm1p = (roaring64_bitmap_t **)
+    lua_newuserdata(L, sizeof(roaring64_bitmap_t *)); // s, b
+  *bm1p = bm1;
+  luaL_getmetatable(L, MT); // s, b, mt
+  lua_setmetatable(L, -2); // s, b
+  lua_pushinteger(L, num_patches);
+  lua_pushinteger(L, patch_size);
+  return 3;
+}
+
 static luaL_Reg fns[] =
 {
   { "create", tk_bitmap_create },
@@ -558,10 +656,11 @@ static luaL_Reg fns[] =
   { "or", tk_bitmap_or },
   { "xor", tk_bitmap_xor },
   { "flip", tk_bitmap_flip },
-  { "flip_interleave", tk_bitmap_flip_interleave },
-  { "top_mutual_information", tk_bitmap_top_mutual_information },
   { "extend", tk_bitmap_extend },
   { "bits", tk_bitmap_bits },
+  { "flip_interleave", tk_bitmap_flip_interleave },
+  { "convolve_2d", tk_bitmap_convolve_2d },
+  { "top_mutual_information", tk_bitmap_top_mutual_information },
   { NULL, NULL }
 };
 

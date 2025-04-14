@@ -3,19 +3,14 @@
 - Add early stopping logic to C, normalized by mean:
     `fabs(avg(tcs, -10, -4) - avg(tcs, -5, -1)) / avg(tcs, -5, -1) < eps_norm`
 
-- Leverage visibles array for mis_label computation. No need to iterate full
-  feature space
+- `bits` api that deals entirely with "sorted list of set bits" representation,
+  using kvec, with conversion to/from roaring, packed/raw, and bits
+  representations
 
-- Function to return a list of the top-k features by MI,
-    - Usable without creating a compressor (expose on module metatable)
-    - Threaded
-    - Returns a sorted list of the top-k features
-    - Users can alternatively specify MI threshold for dynamic k
-
-- Threaded tiling of set bits
-
-- Generate raw bitmap for compress, threaded
-- Handle the case where n_hidden is too small, resulting in NaNs
+- Bitmap: threaded top_mi calculation
+- Compressor: threaded tiling of set bits
+- Compressor: handle the case where n_hidden is too small, resulting in NaNs
+- Compressor: compress should return list of set bits representation, threaded
 - Integrate better error messages from tsetlin
 
 # Later
