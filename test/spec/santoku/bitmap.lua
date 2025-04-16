@@ -149,7 +149,9 @@ test("compress", function ()
   local corpus_original = bm.matrix(originals, n_cols_full)
   labels = mtx.raw(mtx.create(labels), nil, nil, "u32")
   print()
-  print(require("santoku.serialize")(bm.top_mutual_information(
+  print(require("santoku.serialize")(bm.top_mi(
+    corpus_original, labels, n_docs, n_cols_full, 2, 100), true))
+  print(require("santoku.serialize")(bm.top_chi2(
     corpus_original, labels, n_docs, n_cols_full, 2, 100), true))
   local compressor = bmc.create({
     visible = n_cols_full,

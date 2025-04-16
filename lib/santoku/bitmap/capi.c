@@ -454,7 +454,7 @@ static int tk_bitmap_mi_sort (const void *ap, const void *bp)
   return 0;
 }
 
-static int tk_bitmap_top_mutual_information (lua_State *L)
+static int tk_bitmap_top_mi (lua_State *L)
 {
   lua_settop(L, 6);
   roaring64_bitmap_t *bm0 = peek(L, 1);
@@ -607,6 +607,110 @@ static inline roaring64_bitmap_t *_tk_bitmap_convolve_2d (
   return out_bm;
 }
 
+typedef struct {
+  double chi2;
+  unsigned int v;
+} tk_bitmap_chi2_pair;
+
+static int tk_bitmap_chi2_sort (const void *ap, const void *bp)
+{
+  const tk_bitmap_chi2_pair *a = (const tk_bitmap_chi2_pair *)ap;
+  const tk_bitmap_chi2_pair *b = (const tk_bitmap_chi2_pair *)bp;
+  if (a->chi2 > b->chi2) return -1;
+  if (a->chi2 < b->chi2) return  1;
+  return 0;
+}
+
+static int tk_bitmap_top_chi2 (lua_State *L)
+{
+  lua_settop(L, 6);
+  roaring64_bitmap_t *bm0 = peek(L, 1);
+  unsigned int *labels = (unsigned int *) luaL_checkstring(L, 2);
+  uint64_t n_samples = tk_lua_checkunsigned(L, 3);
+  uint64_t n_visible = tk_lua_checkunsigned(L, 4);
+  uint64_t n_labels = tk_lua_checkunsigned(L, 5);
+  double min_chi2 = luaL_checknumber(L, 6);
+  tk_bitmap_chi2_pair *chis = tk_malloc(L, n_visible * sizeof(tk_bitmap_chi2_pair));
+  for (unsigned int v = 0; v < n_visible; v++)
+    chis[v] = (tk_bitmap_chi2_pair){ .chi2 = 0, .v = v };
+  unsigned int *global_counts = tk_malloc(L, n_labels * sizeof(unsigned int));
+  for (unsigned int y = 0; y < n_labels; y++)
+    global_counts[y] = 0;
+  for (unsigned int s = 0; s < n_samples; s++) {
+    unsigned int y = labels[s];
+    if (y >= n_labels)
+      tk_lua_error(L, "provided label is outside of range 0 to n_labels - 1");
+    global_counts[y]++;
+  }
+  mi_state_t state;
+  state.labels = labels;
+  state.n_labels = n_labels;
+  state.n_visible = n_visible;
+  uint64_t *active_counts = tk_malloc(L, n_visible * n_labels * sizeof(uint64_t));
+  double *px = tk_malloc(L, n_visible * sizeof(double)); // used only for counting here
+  state.active_counts = active_counts;
+  state.px = px;
+  memset(state.active_counts, 0, n_visible * n_labels * sizeof(uint64_t));
+  memset(state.px, 0, n_visible * sizeof(double));
+  roaring64_bitmap_iterate(bm0, tk_bitmap_mi_iter, &state);
+  for (unsigned int v = 0; v < n_visible; v++) {
+    unsigned int active_total = 0;
+    for (unsigned int y = 0; y < n_labels; y++)
+      active_total += active_counts[v * n_labels + y];
+    unsigned int inactive_total = n_samples - active_total;
+    if (active_total == 0)
+      continue;
+    double chi2 = 0.0;
+    for (unsigned int y = 0; y < n_labels; y++) {
+      unsigned int observed_active = active_counts[v * n_labels + y];
+      unsigned int observed_inactive = global_counts[y] - observed_active;
+      double expected_active = ((double)global_counts[y] * active_total) / n_samples;
+      double expected_inactive = ((double)global_counts[y] * inactive_total) / n_samples;
+      if (expected_active > 0) {
+        double diff = observed_active - expected_active;
+        chi2 += (diff * diff) / expected_active;
+      }
+      if (expected_inactive > 0) {
+        double diff = observed_inactive - expected_inactive;
+        chi2 += (diff * diff) / expected_inactive;
+      }
+    }
+    chis[v].chi2 = chi2;
+  }
+  double max_chi2 = 1e-10;
+  for (unsigned int v = 0; v < n_visible; v++) {
+    if (chis[v].chi2 > max_chi2)
+      max_chi2 = chis[v].chi2;
+  }
+  for (unsigned int v = 0; v < n_visible; v++) {
+    chis[v].chi2 /= max_chi2;
+  }
+  free(global_counts);
+  free(active_counts);
+  free(px);
+  qsort(chis, n_visible, sizeof(tk_bitmap_chi2_pair), tk_bitmap_chi2_sort);
+  lua_newtable(L);
+  if (min_chi2 > 1) {
+    unsigned int m = (unsigned int) floor(min_chi2);
+    if (m > n_visible) m = n_visible;
+    for (unsigned int i = 0; i < m; i++) {
+      lua_pushinteger(L, i + 1);
+      lua_pushinteger(L, chis[i].v);
+      lua_settable(L, -3);
+    }
+  } else {
+    for (unsigned int i = 0; i < n_visible; i++) {
+      if (chis[i].chi2 < min_chi2)
+        break;
+      lua_pushinteger(L, i + 1);
+      lua_pushinteger(L, chis[i].v);
+      lua_settable(L, -3);
+    }
+  }
+  free(chis);
+  return 1;
+}
+
 static int tk_bitmap_convolve_2d (lua_State *L)
 {
   roaring64_bitmap_t *bm0 = peek(L, 1);
@@ -660,7 +764,8 @@ static luaL_Reg fns[] =
   { "bits", tk_bitmap_bits },
   { "flip_interleave", tk_bitmap_flip_interleave },
   { "convolve_2d", tk_bitmap_convolve_2d },
-  { "top_mutual_information", tk_bitmap_top_mutual_information },
+  { "top_mi", tk_bitmap_top_mi },
+  { "top_chi2", tk_bitmap_top_chi2 },
   { NULL, NULL }
 };
 
