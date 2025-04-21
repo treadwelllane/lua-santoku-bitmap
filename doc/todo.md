@@ -7,7 +7,7 @@
   using kvec, with conversion to/from roaring, packed/raw, and bits
   representations
 
-- Bitmap: threaded top_mi calculation
+- Bitmap: threaded top_mi and top_chi2
 - Compressor: threaded tiling of set bits
 - Compressor: handle the case where n_hidden is too small, resulting in NaNs
 - Compressor: compress should return list of set bits representation, threaded

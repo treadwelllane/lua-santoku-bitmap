@@ -496,29 +496,24 @@ static int tk_bitmap_top_mi (lua_State *L)
       continue;
     double p_active = px[v];
     double p_inactive = 1.0 - p_active;
-    double mi = 0.0;
+    double max_mi = 0.0;
     for (unsigned int y = 0; y < n_labels; y ++) {
       double joint_active = ((double) active_counts[v * n_labels + y]) / n_samples;
       double joint_inactive = ((double) (global_counts[y] - active_counts[v * n_labels + y])) / n_samples;
       double p_y = ((double) global_counts[y]) / n_samples;
+      double mi_y = 0.0;
       if (joint_active > 0 && p_active > 0 && p_y > 0) {
         double denom = p_active * p_y;
-        mi += joint_active * log(joint_active / denom);
+        mi_y += joint_active * log(joint_active / denom);
       }
       if (joint_inactive > 0 && p_inactive > 0 && p_y > 0) {
         double denom = p_inactive * p_y;
-        mi += joint_inactive * log(joint_inactive / denom);
+        mi_y += joint_inactive * log(joint_inactive / denom);
       }
+      if (mi_y > max_mi)
+        max_mi = mi_y;
     }
-    mis[v].mi = mi;
-  }
-  double max_mi = 1e-10;
-  for (unsigned int v = 0; v < n_visible; v++) {
-    if (mis[v].mi > max_mi)
-      max_mi = mis[v].mi;
-  }
-  for (unsigned int v = 0; v < n_visible; v++) {
-    mis[v].mi /= max_mi;
+    mis[v].mi = max_mi;
   }
   free(global_counts);
   free(active_counts);
@@ -631,16 +626,16 @@ static int tk_bitmap_top_chi2 (lua_State *L)
   uint64_t n_labels = tk_lua_checkunsigned(L, 5);
   double min_chi2 = luaL_checknumber(L, 6);
   tk_bitmap_chi2_pair *chis = tk_malloc(L, n_visible * sizeof(tk_bitmap_chi2_pair));
-  for (unsigned int v = 0; v < n_visible; v++)
+  for (unsigned int v = 0; v < n_visible; v ++)
     chis[v] = (tk_bitmap_chi2_pair){ .chi2 = 0, .v = v };
   unsigned int *global_counts = tk_malloc(L, n_labels * sizeof(unsigned int));
-  for (unsigned int y = 0; y < n_labels; y++)
+  for (unsigned int y = 0; y < n_labels; y ++)
     global_counts[y] = 0;
-  for (unsigned int s = 0; s < n_samples; s++) {
+  for (unsigned int s = 0; s < n_samples; s ++) {
     unsigned int y = labels[s];
     if (y >= n_labels)
       tk_lua_error(L, "provided label is outside of range 0 to n_labels - 1");
-    global_counts[y]++;
+    global_counts[y] ++;
   }
   mi_state_t state;
   state.labels = labels;
@@ -653,37 +648,32 @@ static int tk_bitmap_top_chi2 (lua_State *L)
   memset(state.active_counts, 0, n_visible * n_labels * sizeof(uint64_t));
   memset(state.px, 0, n_visible * sizeof(double));
   roaring64_bitmap_iterate(bm0, tk_bitmap_mi_iter, &state);
-  for (unsigned int v = 0; v < n_visible; v++) {
+  for (unsigned int v = 0; v < n_visible; v ++) {
     unsigned int active_total = 0;
-    for (unsigned int y = 0; y < n_labels; y++)
+    for (unsigned int y = 0; y < n_labels; y ++)
       active_total += active_counts[v * n_labels + y];
     unsigned int inactive_total = n_samples - active_total;
     if (active_total == 0)
       continue;
-    double chi2 = 0.0;
-    for (unsigned int y = 0; y < n_labels; y++) {
+    double max_chi2 = 0.0;
+    for (unsigned int y = 0; y < n_labels; y ++) {
       unsigned int observed_active = active_counts[v * n_labels + y];
       unsigned int observed_inactive = global_counts[y] - observed_active;
       double expected_active = ((double)global_counts[y] * active_total) / n_samples;
       double expected_inactive = ((double)global_counts[y] * inactive_total) / n_samples;
+      double chi2_y = 0.0;
       if (expected_active > 0) {
         double diff = observed_active - expected_active;
-        chi2 += (diff * diff) / expected_active;
+        chi2_y += (diff * diff) / expected_active;
       }
       if (expected_inactive > 0) {
         double diff = observed_inactive - expected_inactive;
-        chi2 += (diff * diff) / expected_inactive;
+        chi2_y += (diff * diff) / expected_inactive;
       }
+      if (chi2_y > max_chi2)
+        max_chi2 = chi2_y;
     }
-    chis[v].chi2 = chi2;
-  }
-  double max_chi2 = 1e-10;
-  for (unsigned int v = 0; v < n_visible; v++) {
-    if (chis[v].chi2 > max_chi2)
-      max_chi2 = chis[v].chi2;
-  }
-  for (unsigned int v = 0; v < n_visible; v++) {
-    chis[v].chi2 /= max_chi2;
+    chis[v].chi2 = max_chi2;
   }
   free(global_counts);
   free(active_counts);
@@ -693,13 +683,13 @@ static int tk_bitmap_top_chi2 (lua_State *L)
   if (min_chi2 > 1) {
     unsigned int m = (unsigned int) floor(min_chi2);
     if (m > n_visible) m = n_visible;
-    for (unsigned int i = 0; i < m; i++) {
+    for (unsigned int i = 0; i < m; i ++) {
       lua_pushinteger(L, i + 1);
       lua_pushinteger(L, chis[i].v);
       lua_settable(L, -3);
     }
   } else {
-    for (unsigned int i = 0; i < n_visible; i++) {
+    for (unsigned int i = 0; i < n_visible; i ++) {
       if (chis[i].chi2 < min_chi2)
         break;
       lua_pushinteger(L, i + 1);
