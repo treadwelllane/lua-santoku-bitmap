@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-bitmap",
-  version = "0.0.55-1",
+  version = "0.0.57-1",
   variable_prefix = "TK_BITMAP",
   license = "MIT",
   public = true,
@@ -11,7 +11,7 @@ local env = {
 
   dependencies = {
     "lua == 5.1",
-    "santoku >= 0.0.247-1",
+    "santoku >= 0.0.257-1",
   },
 
   test = {
@@ -19,7 +19,7 @@ local env = {
     ldflags = { "-g3" },
     dependencies = {
       "santoku-fs == 0.0.34-1",
-      "santoku-matrix == 0.0.13-1",
+      "santoku-matrix == 0.0.33-1",
       "luacov == 0.15.0-1",
     }
   },
