@@ -18,8 +18,6 @@ local env = {
     cflags = { "-g3" },
     ldflags = { "-g3" },
     dependencies = {
-      "santoku-fs == 0.0.34-1",
-      "santoku-matrix == 0.0.33-1",
       "luacov == 0.15.0-1",
     }
   },

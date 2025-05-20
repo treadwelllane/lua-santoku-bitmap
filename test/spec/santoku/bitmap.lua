@@ -1,13 +1,9 @@
 local test = require("santoku.test")
-local utc = require("santoku.utc")
-local str = require("santoku.string")
 local err = require("santoku.error")
-local fs = require("santoku.fs")
 local assert = err.assert
 local vdt = require("santoku.validate")
 local eq = vdt.isequal
 local bm = require("santoku.bitmap")
-local mtx = require("santoku.matrix.integer")
 
 test("chunk bits", function ()
   assert(eq(bm.chunk_bits, 32))
